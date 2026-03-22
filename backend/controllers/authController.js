@@ -34,7 +34,7 @@ const registerUser = async (req, res) => {
       }
     };
 
-    if (role === 'Donor' || role === 'Patient') {
+    if (role === 'User' || role === 'Donor' || role === 'Patient') {
       userData.bloodGroup = bloodGroup;
     }
 

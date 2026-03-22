@@ -18,11 +18,17 @@ const requestSchema = new mongoose.Schema({
   },
   status: {
     type: String,
-    enum: ['Pending', 'Accepted', 'Fulfilled', 'Closed'],
+    enum: ['Pending', 'Accepted', 'Blood Assigned', 'Fulfilled', 'Closed'],
     default: 'Pending'
   },
-  acceptedBy: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
-  fulfilledBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }
+  acceptedBy: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }], // Array of potential responders
+  
+  // Who officially accepted/claimed the request (Hospital or Blood bank)
+  handledBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  
+  // Who actually fulfilled it (Platform User ID or Internal Donor ID string)
+  assignedDonorId: { type: String },
+  assignedDonorType: { type: String, enum: ['Platform', 'Internal'] }
 }, { timestamps: true });
 
 // Index for geospatial queries on requests

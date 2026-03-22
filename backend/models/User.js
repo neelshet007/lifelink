@@ -1,28 +1,42 @@
 const mongoose = require('mongoose');
 
+const internalDonorSchema = new mongoose.Schema({
+  name: { type: String, required: true },
+  bloodGroup: { 
+    type: String, 
+    enum: ['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-'], 
+    required: true 
+  },
+  contact: { type: String, required: true },
+  lastDonationDate: { type: Date },
+  isAvailable: { type: Boolean, default: true }
+});
+
 const userSchema = new mongoose.Schema({
   name: { type: String, required: true },
   email: { type: String, required: true, unique: true },
   password: { type: String, required: true },
   role: { 
     type: String, 
-    enum: ['Donor', 'Patient', 'Hospital', 'Blood Bank', 'Admin'],
+    enum: ['User', 'Hospital', 'Blood Bank', 'Admin'],
     required: true
   },
   bloodGroup: { 
     type: String, 
-    enum: ['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-'],
-    required: function() { return this.role === 'Donor' || this.role === 'Patient'; }
+    enum: ['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-', ''],
+    required: function() { return this.role === 'User'; }
   },
   location: {
     type: { type: String, enum: ['Point'], default: 'Point' },
     coordinates: { type: [Number], required: true } // [longitude, latitude]
   },
-  // Donor specific
+  // Unified User generic fields
   lastDonationDate: { type: Date },
   isAvailable: { type: Boolean, default: true },
   
-  // Hospital/Blood Bank specific
+  // Hospital/Blood Bank specific internal DB
+  internalDonorDatabase: [internalDonorSchema],
+  
   inventory: {
     type: Map,
     of: Number,
