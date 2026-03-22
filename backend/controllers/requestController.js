@@ -124,7 +124,7 @@ const getMyRequests = async (req, res) => {
 // @route   GET /api/requests/incoming
 const getIncomingRequests = async (req, res) => {
   try {
-    const requests = await Request.find({ status: { $in: ['Pending', 'Accepted'] } })
+    const requests = await Request.find({})
       .populate('requester', 'name email location')
       .sort({ createdAt: -1 });
     res.json(requests);
@@ -210,7 +210,17 @@ const getRequestMatches = async (req, res) => {
           ? Math.floor((new Date() - new Date(donor.lastDonationDate)) / (1000 * 60 * 60 * 24))
           : null;
         const score = calculateScore(0, compat, true, lastDonationDaysAgo);
-        return { _id: donor._id, name: donor.name, type: 'Internal', bloodGroup: donor.bloodGroup, contact: donor.contact, score };
+        return {
+          _id: donor._id,
+          name: donor.name,
+          age: donor.age,
+          type: 'Internal',
+          bloodGroup: donor.bloodGroup,
+          contact: donor.contact,
+          barcodeId: donor.barcodeId,
+          donationHistory: donor.donationHistory,
+          score
+        };
       });
 
     // Platform Users — strictly filtered
@@ -250,11 +260,7 @@ const getRequestMatches = async (req, res) => {
 // @route   PUT /api/requests/:id/assign
 const assignDonor = async (req, res) => {
   try {
-    const { assignedDonorId, assignedDonorType, patientName, barcode } = req.body;
-
-    if (!patientName || !barcode) {
-      return res.status(400).json({ message: 'Patient Name and Barcode ID are required to complete the request.' });
-    }
+    const { assignedDonorId, assignedDonorType } = req.body;
 
     const request = await Request.findById(req.params.id);
     if (!request) return res.status(404).json({ message: 'Request not found' });
@@ -262,7 +268,7 @@ const assignDonor = async (req, res) => {
     request.assignedDonorId = assignedDonorId;
     request.assignedDonorType = assignedDonorType;
     request.handledBy = req.user._id;
-    request.status = 'Completed';
+    request.status = 'Fulfilled';
     const updatedRequest = await request.save();
 
     const io = req.app.get('io');
@@ -272,7 +278,7 @@ const assignDonor = async (req, res) => {
         message: `Your blood request has been fulfilled by ${req.user.name}`
       });
       // Broadcast removal to all
-      io.emit('request-updated', { requestId: request._id, status: 'Completed' });
+      io.emit('request-updated', { requestId: request._id, status: 'Fulfilled' });
     }
 
     res.json(updatedRequest);

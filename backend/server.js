@@ -12,16 +12,31 @@ const { errorHandler } = require('./middleware/errorMiddleware');
 const app = express();
 const server = http.createServer(app);
 
-// Security Middleware
-app.use(helmet());
+// ✅ CORS must come BEFORE helmet so browser preflight requests are handled first
+app.use(cors({
+  origin: [
+    'http://localhost:3000',
+    process.env.FRONTEND_URL || 'http://localhost:3000'
+  ],
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
+
+
+
+// Security Middleware (after CORS)
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: 'cross-origin' } // allow assets cross-origin
+}));
+
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // Limit each IP to 100 requests per `window`
+  max: 200, // raised to avoid dev throttling
   message: 'Too many requests from this IP, please try again after 15 minutes'
 });
 app.use(limiter);
 
-app.use(cors());
 app.use(express.json());
 
 // Routes
@@ -45,7 +60,6 @@ mongoose.connect(MONGO_URI)
   .then(() => {
     console.log('Connected to MongoDB');
     
-    // Init Socket.io and make it accessible globally if needed
     const io = setupSocket(server);
     app.set('io', io);
 
