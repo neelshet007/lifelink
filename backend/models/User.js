@@ -2,12 +2,15 @@ const mongoose = require('mongoose');
 
 const internalDonorSchema = new mongoose.Schema({
   name: { type: String, required: true },
+  age: { type: Number, required: true },
   bloodGroup: { 
     type: String, 
     enum: ['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-'], 
     required: true 
   },
   contact: { type: String, required: true },
+  barcodeId: { type: String, required: true },  // Sample/ID barcode
+  donationHistory: { type: String, default: '' }, // e.g. "2 donations"
   lastDonationDate: { type: Date },
   isAvailable: { type: Boolean, default: true }
 });
