@@ -39,6 +39,20 @@ export default function UserDashboard() {
 
   // Stats
   const [stats, setStats] = useState({ requests: 0, donations: 0, matches: 0 });
+  const [countdown, setCountdown] = useState(null);
+
+  const calculateCountdown = (lastDate, isEligible) => {
+    if (isEligible === false && lastDate) {
+      const remainingMs = new Date(lastDate).getTime() + 90 * 24 * 60 * 60 * 1000 - Date.now();
+      if (remainingMs > 0) {
+        setCountdown(Math.ceil(remainingMs / (1000 * 60 * 60 * 24)));
+      } else {
+        setCountdown(null);
+      }
+    } else {
+      setCountdown(null);
+    }
+  };
 
   useEffect(() => {
     const userData = JSON.parse(localStorage.getItem('user'));
@@ -89,6 +103,12 @@ export default function UserDashboard() {
         donations: 0,
         matches: res.data.filter(r => r.status === 'Completed').length
       });
+
+      const userRes = await axios.get('http://localhost:5000/api/auth/me', {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      setUser(userRes.data);
+      calculateCountdown(userRes.data.lastDonationDate, userRes.data.is_eligible);
     } catch (err) {
       console.error(err);
     } finally {
@@ -255,16 +275,29 @@ export default function UserDashboard() {
             </div>
 
             <div className="space-y-8">
-              <div className="bg-gradient-to-br from-lifered-600 to-red-800 p-8 rounded-3xl shadow-2xl relative overflow-hidden group">
-                 <div className="absolute top-0 right-0 p-8 opacity-10 group-hover:scale-110 transition-transform">
-                    <Heart className="h-24 w-24" />
-                 </div>
-                 <h3 className="text-white text-2xl font-black mb-4 relative z-10">Donate & Save Lives</h3>
-                 <p className="text-red-100 text-sm mb-6 relative z-10 opacity-80">Check the Emergency Alerts tab for nearby requests that need your blood type.</p>
-                 <button className="w-full py-3 bg-white text-lifered-600 font-bold rounded-2xl relative z-10 shadow-lg hover:shadow-white/20 transition-all">
-                    Enable Notifications
-                 </button>
-              </div>
+              {countdown !== null ? (
+                <div className="bg-gradient-to-br from-orange-500 to-orange-700 p-8 rounded-3xl shadow-2xl relative overflow-hidden group">
+                  <div className="absolute top-0 right-0 p-8 opacity-10 group-hover:scale-110 transition-transform">
+                    <Clock className="h-24 w-24" />
+                  </div>
+                  <h3 className="text-white text-2xl font-black mb-4 relative z-10">Donation Cooldown</h3>
+                  <p className="text-orange-100 text-sm mb-6 relative z-10 opacity-80">Thank you for donating! You must wait 90 days between donations for your safety.</p>
+                  <div className="w-full py-4 bg-white text-orange-600 font-black rounded-2xl relative z-10 shadow-lg text-center font-mono flex items-center justify-center gap-2">
+                    <Clock className="h-5 w-5" /> Next eligible in <span className="text-xl">{countdown}</span> days
+                  </div>
+                </div>
+              ) : (
+                <div className="bg-gradient-to-br from-lifered-600 to-red-800 p-8 rounded-3xl shadow-2xl relative overflow-hidden group">
+                   <div className="absolute top-0 right-0 p-8 opacity-10 group-hover:scale-110 transition-transform">
+                      <Heart className="h-24 w-24" />
+                   </div>
+                   <h3 className="text-white text-2xl font-black mb-4 relative z-10">Donate & Save Lives</h3>
+                   <p className="text-red-100 text-sm mb-6 relative z-10 opacity-80">Check the Emergency Alerts tab for nearby requests that need your blood type.</p>
+                   <button className="w-full py-3 bg-white text-lifered-600 font-bold rounded-2xl relative z-10 shadow-lg hover:shadow-white/20 transition-all">
+                      Enable Notifications
+                   </button>
+                </div>
+              )}
 
               <div className="glass-dark p-6 rounded-3xl border border-white/5">
                  <h4 className="font-bold mb-4 flex items-center gap-2 text-white">

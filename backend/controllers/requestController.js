@@ -1,5 +1,6 @@
 const Request = require('../models/Request');
 const User = require('../models/User');
+const mongoose = require('mongoose');
 const { getDistance, calculateScore } = require('../utils/matchingAlgorithm');
 
 // Blood compatibility check helper
@@ -19,7 +20,7 @@ const getCompatibility = (donorBloodGroup, requestedBloodGroup) => {
   return 'Not compatible';
 };
 
-const isEligible = (lastDonationDate) => {
+const checkEligibility = (lastDonationDate) => {
   if (!lastDonationDate) return true; // never donated, fully eligible
   const days = Math.floor((new Date() - new Date(lastDonationDate)) / (1000 * 60 * 60 * 24));
   return days >= 90;
@@ -72,7 +73,7 @@ const createRequest = async (req, res) => {
         // Smart filtering: only if blood compatible, available, and eligible
         compatibility = getCompatibility(user.bloodGroup, bloodGroup);
         const available = user.isAvailable !== false;
-        const eligible = isEligible(user.lastDonationDate);
+        const eligible = checkEligibility(user.lastDonationDate) && user.is_eligible !== false;
         shouldNotify = (compatibility !== 'Not compatible') && available && eligible;
       }
 
@@ -171,6 +172,40 @@ const updateRequestStatus = async (req, res) => {
           requestId: updated._id,
           status: 'Accepted'
         });
+
+        // 5. Real-Time Hospital Notifications
+        if (req.user.role === 'User') {
+          // Find hospitals within 10km radius
+          User.findById(updated.requester).then(requesterUser => {
+            if (requesterUser && requesterUser.location) {
+              User.find({
+                role: { $in: ['Hospital', 'Blood Bank'] },
+                location: {
+                  $near: {
+                    $geometry: requesterUser.location,
+                    $maxDistance: 10000 // 10km
+                  }
+                }
+              }).then(nearbyHospitals => {
+                nearbyHospitals.forEach(hospital => {
+                  io.to(hospital._id.toString()).emit('donor-accepted-area', {
+                    requestId: updated._id,
+                    message: 'Action Required: A donor has accepted a request in your area. Please verify and finalize the donation.',
+                    donorName: userName,
+                    requesterId: updated.requester,
+                    donorDetails: {
+                      name: userName,
+                      bloodGroup: req.user.bloodGroup,
+                      contact: req.user.contact,
+                      age: req.user.age,
+                      id: userId
+                    }
+                  });
+                });
+              });
+            }
+          }).catch(err => console.error(err));
+        }
       }
 
       return res.json(updated);
@@ -202,7 +237,7 @@ const getRequestMatches = async (req, res) => {
     const internalMatches = hospital.internalDonorDatabase
       .filter(donor => {
         const compat = getCompatibility(donor.bloodGroup, request.bloodGroup);
-        return compat !== 'Not compatible' && donor.isAvailable !== false && isEligible(donor.lastDonationDate);
+        return compat !== 'Not compatible' && donor.isAvailable !== false && checkEligibility(donor.lastDonationDate) && donor.is_eligible !== false;
       })
       .map(donor => {
         const compat = getCompatibility(donor.bloodGroup, request.bloodGroup);
@@ -232,7 +267,7 @@ const getRequestMatches = async (req, res) => {
     const platformMatches = allUsers
       .filter(user => {
         const compat = getCompatibility(user.bloodGroup, request.bloodGroup);
-        return compat !== 'Not compatible' && user.isAvailable !== false && isEligible(user.lastDonationDate);
+        return compat !== 'Not compatible' && user.isAvailable !== false && checkEligibility(user.lastDonationDate) && user.is_eligible !== false;
       })
       .map(user => {
         const distance = getDistance(
@@ -244,7 +279,7 @@ const getRequestMatches = async (req, res) => {
           ? Math.floor((new Date() - new Date(user.lastDonationDate)) / (1000 * 60 * 60 * 24))
           : null;
         const score = calculateScore(distance, compat, true, lastDonationDaysAgo);
-        return { _id: user._id, name: user.name, type: 'Platform', bloodGroup: user.bloodGroup, score };
+        return { _id: user._id, name: user.name, type: 'Platform', bloodGroup: user.bloodGroup, score, contact: user.contact, age: user.age };
       });
 
     const allMatches = [...internalMatches, ...platformMatches].sort((a, b) => b.score - a.score);
@@ -260,13 +295,64 @@ const getRequestMatches = async (req, res) => {
 // @route   PUT /api/requests/:id/assign
 const assignDonor = async (req, res) => {
   try {
-    const { assignedDonorId, assignedDonorType } = req.body;
+    const { assignedDonorId, phoneNumber } = req.body;
+
+    const hospital = await User.findById(req.user._id);
+    let targetDonor = null;
+    let targetDonorType = null;
+
+    // Search in Internal Donors by barcodeId or contact
+    if (hospital && hospital.internalDonorDatabase) {
+       targetDonor = hospital.internalDonorDatabase.find(d => 
+         (d.barcodeId && d.barcodeId === assignedDonorId) || 
+         (d.contact && d.contact === phoneNumber)
+       );
+       if (targetDonor) targetDonorType = 'Internal';
+    }
+
+    // If not found in internal, search in Platform Users by _id
+    if (!targetDonor && assignedDonorId && mongoose.isValidObjectId(assignedDonorId)) {
+       targetDonor = await User.findById(assignedDonorId);
+       if (targetDonor && targetDonor.role === 'User') {
+          targetDonorType = 'Platform';
+       } else {
+          targetDonor = null;
+       }
+    }
+
+    if (!targetDonor) {
+       return res.status(404).json({ message: 'User Not Found.' });
+    }
+
+    // Check 90-day cooldown
+    if (targetDonor.is_eligible === false || !checkEligibility(targetDonor.lastDonationDate)) {
+       const cdDate = targetDonor.lastDonationDate 
+         ? new Date(new Date(targetDonor.lastDonationDate).getTime() + 90*24*60*60*1000).toLocaleDateString()
+         : 'unknown';
+       return res.status(403).json({ 
+         message: `User found but ineligible: 90-day cooldown active until ${cdDate}.` 
+       });
+    }
 
     const request = await Request.findById(req.params.id);
     if (!request) return res.status(404).json({ message: 'Request not found' });
 
-    request.assignedDonorId = assignedDonorId;
-    request.assignedDonorType = assignedDonorType;
+    // Mark donor as ineligible and update last donation date
+    const now = new Date();
+    if (targetDonorType === 'Internal') {
+       targetDonor.lastDonationDate = now;
+       targetDonor.is_eligible = false;
+       targetDonor.donation_history.push(now);
+       await hospital.save();
+    } else {
+       targetDonor.lastDonationDate = now;
+       targetDonor.is_eligible = false;
+       targetDonor.donation_history.push(now);
+       await targetDonor.save();
+    }
+
+    request.assignedDonorId = targetDonorType === 'Internal' ? targetDonor.barcodeId : targetDonor._id.toString();
+    request.assignedDonorType = targetDonorType;
     request.handledBy = req.user._id;
     request.status = 'Fulfilled';
     const updatedRequest = await request.save();

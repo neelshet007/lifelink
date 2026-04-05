@@ -10,7 +10,7 @@ export default function AuthForm({ type }) {
   const isLogin = type === 'login';
   const router = useRouter();
   const [formData, setFormData] = useState({
-    name: '', email: '', password: '', role: 'User', bloodGroup: 'A+', latitude: '', longitude: ''
+    name: '', email: '', contact: '', age: '', password: '', role: 'User', bloodGroup: 'A+', latitude: '', longitude: ''
   });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -92,14 +92,35 @@ export default function AuthForm({ type }) {
               </div>
               <input
                 type="text" name="name" placeholder="Full Name or Organization Name" required
+                suppressHydrationWarning
                 className="w-full pl-10 pr-4 py-3 bg-brand-dark/50 border border-white/10 rounded-xl text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-lifered-500 focus:border-transparent transition-all"
                 onChange={handleChange}
               />
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div className="relative">
+                <input
+                  type="text" name="contact" placeholder="Mobile Number" required
+                  suppressHydrationWarning
+                  className="w-full px-4 py-3 bg-brand-dark/50 border border-white/10 rounded-xl text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-lifered-500 transition-all"
+                  onChange={handleChange}
+                />
+              </div>
+              <div className="relative">
+                <input
+                  type="number" name="age" placeholder="Age" required min="18" max="65"
+                  suppressHydrationWarning
+                  className="w-full px-4 py-3 bg-brand-dark/50 border border-white/10 rounded-xl text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-lifered-500 transition-all"
+                  onChange={handleChange}
+                />
+              </div>
             </div>
             
             <div className="grid grid-cols-2 gap-4">
               <div className="relative">
                 <select name="role" onChange={handleChange} value={formData.role}
+                  suppressHydrationWarning
                   className="w-full appearance-none pl-4 pr-10 py-3 bg-brand-dark/50 border border-white/10 rounded-xl text-white focus:outline-none focus:ring-2 focus:ring-lifered-500 transition-all">
                   <option value="User">User</option>
                   <option value="Hospital">Hospital</option>
@@ -114,6 +135,7 @@ export default function AuthForm({ type }) {
               {(formData.role === 'User') && (
                 <div className="relative">
                   <select name="bloodGroup" onChange={handleChange} value={formData.bloodGroup}
+                    suppressHydrationWarning
                     className="w-full appearance-none pl-4 pr-10 py-3 bg-brand-dark/50 border border-white/10 rounded-xl text-white focus:outline-none focus:ring-2 focus:ring-lifered-500 transition-all">
                     {['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-'].map(bg => <option key={bg} value={bg}>{bg}</option>)}
                   </select>
@@ -139,7 +161,8 @@ export default function AuthForm({ type }) {
             <Mail className="h-5 w-5 text-gray-500" />
           </div>
           <input
-            type="email" name="email" placeholder="Email Address" required
+            type={isLogin ? "text" : "email"} name="email" placeholder={isLogin ? "Email Address or Mobile Number" : "Email Address"} required
+            suppressHydrationWarning
             className="w-full pl-10 pr-4 py-3 bg-brand-dark/50 border border-white/10 rounded-xl text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-lifered-500 transition-all"
             onChange={handleChange}
           />
@@ -151,12 +174,14 @@ export default function AuthForm({ type }) {
           </div>
           <input
             type="password" name="password" placeholder="Password" required
+            suppressHydrationWarning
             className="w-full pl-10 pr-4 py-3 bg-brand-dark/50 border border-white/10 rounded-xl text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-lifered-500 transition-all"
             onChange={handleChange}
           />
         </div>
 
         <button type="submit" disabled={loading || (!isLogin && !formData.latitude && formData.role !== 'Admin')}
+          suppressHydrationWarning
           className="w-full py-3.5 bg-lifered-600 hover:bg-lifered-500 text-white font-bold rounded-xl transition-all shadow-lg shadow-lifered-500/20 active:scale-95 disabled:opacity-50 flex justify-center items-center mt-6">
           {loading ? (
              <svg className="animate-spin h-5 w-5 text-white" viewBox="0 0 24 24">

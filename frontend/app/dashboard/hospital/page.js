@@ -20,7 +20,7 @@ export default function HospitalDashboard() {
   const [internalDonors, setInternalDonors] = useState([]);
   const [dbModal, setDbModal] = useState(false);
   const [newDonor, setNewDonor] = useState({
-    name: '', age: '', bloodGroup: 'A+', contact: '', barcodeId: '', donationHistory: '', isAvailable: true
+    name: '', age: '', bloodGroup: 'A+', contact: '', barcodeId: '', donationHistory: '', isAvailable: true, donatedIn90Days: false, lastDonationDate: '', is_eligible: true
   });
 
   // Split requests into active pipeline vs history
@@ -39,6 +39,11 @@ export default function HospitalDashboard() {
       socket.emit('join', userData.id);
 
       socket.on('new-blood-request', (data) => {
+        setNotifications(prev => [data, ...prev.filter(n => n.requestId !== data.requestId)]);
+        fetchRequests();
+      });
+
+      socket.on('donor-accepted-area', (data) => {
         setNotifications(prev => [data, ...prev.filter(n => n.requestId !== data.requestId)]);
         fetchRequests();
       });
@@ -104,11 +109,11 @@ export default function HospitalDashboard() {
     }
   };
 
-  const handleAssignDonor = async (donorId, type) => {
+  const handleAssignDonor = async (donorId, type, phoneNumber = null) => {
     try {
       const token = localStorage.getItem('token');
       await axios.put(`http://localhost:5000/api/requests/${matchesModal.requestId}/assign`,
-        { assignedDonorId: donorId, assignedDonorType: type },
+        { assignedDonorId: donorId, assignedDonorType: type, phoneNumber: phoneNumber },
         { headers: { Authorization: `Bearer ${token}` } }
       );
       setMatchesModal({ isOpen: false, requestId: null, bloodGroup: '', matches: [], loading: false });
@@ -116,6 +121,21 @@ export default function HospitalDashboard() {
       alert('✅ Donor assigned. Request moved to History.');
     } catch (err) {
       alert(err.response?.data?.message || 'Failed to assign donor');
+    }
+  };
+
+  const handleAssignManual = async (manualId, manualPhone) => {
+    try {
+      const token = localStorage.getItem('token');
+      await axios.put(`http://localhost:5000/api/requests/${matchesModal.requestId}/assign`,
+        { assignedDonorId: manualId, phoneNumber: manualPhone },
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      setMatchesModal({ isOpen: false, requestId: null, bloodGroup: '', matches: [], loading: false });
+      await fetchRequests(); // this will move the request to history
+      alert('✅ Donor manually assigned. Request moved to History.');
+    } catch (err) {
+      alert(err.response?.data?.message || 'Failed to assign donor manually');
     }
   };
 
@@ -128,7 +148,7 @@ export default function HospitalDashboard() {
       });
       setInternalDonors(res.data);
       setDbModal(false);
-      setNewDonor({ name: '', age: '', bloodGroup: 'A+', contact: '', barcodeId: '', donationHistory: '', isAvailable: true });
+      setNewDonor({ name: '', age: '', bloodGroup: 'A+', contact: '', barcodeId: '', donationHistory: '', isAvailable: true, donatedIn90Days: false, lastDonationDate: '', is_eligible: true });
     } catch (err) {
       alert(err.response?.data?.message || 'Failed to add donor');
     }
@@ -246,17 +266,33 @@ export default function HospitalDashboard() {
                     <div className="p-2 bg-lifered-500/20 rounded-lg shrink-0">
                       <AlertCircle className="h-6 w-6 text-lifered-500 animate-pulse" />
                     </div>
-                    <div>
+                    <div className="flex-1">
                       <p className="font-semibold text-white">{notif.message}</p>
-                      <p className="text-sm text-lifered-400 mt-1 flex items-center gap-1">
-                        <MapPin className="h-3 w-3" /> {Number(notif.distance).toFixed(1)} km • {notif.urgency} Urgency
-                      </p>
+                      {notif.donorDetails ? (
+                        <div className="mt-2 text-sm text-gray-300 flex items-center flex-wrap gap-2">
+                          <span className="bg-brand-dark px-2 py-1 rounded-full text-lifered-400 font-bold border border-white/5">{notif.donorDetails.bloodGroup || 'Type Unspecified'}</span>
+                          <span className="font-semibold">{notif.donorDetails.name}</span>
+                          {notif.donorDetails.age && <span className="text-gray-400">({notif.donorDetails.age} yrs)</span>}
+                          {notif.donorDetails.contact && <span className="text-gray-400 font-mono text-xs bg-brand-gray/50 px-2 py-0.5 rounded border border-white/10">{notif.donorDetails.contact}</span>}
+                        </div>
+                      ) : (
+                        <p className="text-sm text-lifered-400 mt-1 flex items-center gap-1">
+                          <MapPin className="h-3 w-3" /> {Number(notif.distance).toFixed(1)} km • {notif.urgency} Urgency
+                        </p>
+                      )}
                     </div>
                   </div>
-                  <button onClick={() => handleUpdateStatus(notif.requestId, 'Accepted')}
-                    className="px-5 py-2 bg-lifered-600 hover:bg-lifered-500 text-white rounded-lg font-medium text-sm transition-colors">
-                    Claim Request
-                  </button>
+                  {notif.donorName ? (
+                    <button onClick={() => openAssignModal({ _id: notif.requestId, bloodGroup: 'Any' })}
+                      className="px-5 py-2 bg-green-600 hover:bg-green-500 text-white rounded-lg font-medium text-sm transition-colors">
+                      Verify & Accept Donor
+                    </button>
+                  ) : (
+                    <button onClick={() => handleUpdateStatus(notif.requestId, 'Accepted')}
+                      className="px-5 py-2 bg-lifered-600 hover:bg-lifered-500 text-white rounded-lg font-medium text-sm transition-colors">
+                      Claim Request
+                    </button>
+                  )}
                 </div>
               ))}
             </div>
@@ -328,12 +364,14 @@ export default function HospitalDashboard() {
                 <div>
                   <label className="block text-sm font-medium text-gray-400 mb-1">Full Name <span className="text-red-400">*</span></label>
                   <input required type="text" placeholder="e.g. John Doe"
+                    suppressHydrationWarning
                     className="w-full bg-brand-gray border border-white/10 rounded-xl p-3 text-white outline-none text-sm"
                     value={newDonor.name} onChange={(e) => setNewDonor({ ...newDonor, name: e.target.value })} />
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-gray-400 mb-1">Age <span className="text-red-400">*</span></label>
                   <input required type="number" min="18" max="65" placeholder="e.g. 28"
+                    suppressHydrationWarning
                     className="w-full bg-brand-gray border border-white/10 rounded-xl p-3 text-white outline-none text-sm"
                     value={newDonor.age} onChange={(e) => setNewDonor({ ...newDonor, age: e.target.value })} />
                 </div>
@@ -342,6 +380,7 @@ export default function HospitalDashboard() {
                 <div>
                   <label className="block text-sm font-medium text-gray-400 mb-1">Blood Group <span className="text-red-400">*</span></label>
                   <select required className="w-full bg-brand-gray border border-white/10 rounded-xl p-3 text-white outline-none text-sm"
+                    suppressHydrationWarning
                     value={newDonor.bloodGroup} onChange={(e) => setNewDonor({ ...newDonor, bloodGroup: e.target.value })}>
                     {['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-'].map(bg => <option key={bg} value={bg}>{bg}</option>)}
                   </select>
@@ -349,6 +388,7 @@ export default function HospitalDashboard() {
                 <div>
                   <label className="block text-sm font-medium text-gray-400 mb-1">Contact <span className="text-red-400">*</span></label>
                   <input required type="text" placeholder="Phone / Email"
+                    suppressHydrationWarning
                     className="w-full bg-brand-gray border border-white/10 rounded-xl p-3 text-white outline-none text-sm"
                     value={newDonor.contact} onChange={(e) => setNewDonor({ ...newDonor, contact: e.target.value })} />
                 </div>
@@ -356,12 +396,34 @@ export default function HospitalDashboard() {
               <div>
                 <label className="block text-sm font-medium text-gray-400 mb-1">Barcode / Donor ID <span className="text-red-400">*</span></label>
                 <input required type="text" placeholder="e.g. DON-2026-00381"
+                  suppressHydrationWarning
                   className="w-full bg-brand-gray border border-white/10 rounded-xl p-3 text-white outline-none text-sm font-mono"
                   value={newDonor.barcodeId} onChange={(e) => setNewDonor({ ...newDonor, barcodeId: e.target.value })} />
               </div>
               <div>
+                <label className="block text-sm font-medium text-gray-400 mb-1">Donated in last 90 days? <span className="text-red-400">*</span></label>
+                <select 
+                  className="w-full bg-brand-gray border border-white/10 rounded-xl p-3 text-white outline-none text-sm"
+                  value={newDonor.donatedIn90Days ? 'Yes' : 'No'}
+                  onChange={(e) => setNewDonor({ ...newDonor, donatedIn90Days: e.target.value === 'Yes', is_eligible: e.target.value === 'No' })}
+                >
+                  <option value="No">No</option>
+                  <option value="Yes">Yes</option>
+                </select>
+              </div>
+              {newDonor.donatedIn90Days && (
+                <div>
+                  <label className="block text-sm font-medium text-gray-400 mb-1">Last Donation Date <span className="text-red-400">*</span></label>
+                  <input required type="date"
+                    suppressHydrationWarning
+                    className="w-full bg-brand-gray border border-white/10 rounded-xl p-3 text-white outline-none text-sm"
+                    value={newDonor.lastDonationDate} onChange={(e) => setNewDonor({ ...newDonor, lastDonationDate: e.target.value })} />
+                </div>
+              )}
+              <div>
                 <label className="block text-sm font-medium text-gray-400 mb-1">Donation History <span className="text-gray-600 text-xs">(optional)</span></label>
                 <input type="text" placeholder="e.g. 3 donations, last in Jan 2025"
+                  suppressHydrationWarning
                   className="w-full bg-brand-gray border border-white/10 rounded-xl p-3 text-white outline-none text-sm"
                   value={newDonor.donationHistory} onChange={(e) => setNewDonor({ ...newDonor, donationHistory: e.target.value })} />
               </div>
@@ -388,6 +450,24 @@ export default function HospitalDashboard() {
             </div>
 
             <div className="flex-1 overflow-y-auto space-y-3 pr-1">
+              {/* Manual Assignment */}
+              <div className="mb-4 flex gap-2 border-b border-white/5 pb-4">
+                 <input type="text" placeholder="Enter Unique ID or Barcode" 
+                   className="flex-1 bg-brand-gray border border-white/10 rounded-xl p-3 text-white text-sm"
+                   id="manual-id" />
+                 <input type="text" placeholder="Enter Phone Number" 
+                   className="flex-1 bg-brand-gray border border-white/10 rounded-xl p-3 text-white text-sm"
+                   id="manual-phone" />
+                 <button onClick={() => {
+                   const manualId = document.getElementById('manual-id').value;
+                   const manualPhone = document.getElementById('manual-phone').value;
+                   if (manualId || manualPhone) handleAssignManual(manualId, manualPhone);
+                 }}
+                   className="px-5 py-3 bg-lifered-600 hover:bg-lifered-500 rounded-xl font-bold text-sm text-white">
+                   Assign Manual
+                 </button>
+              </div>
+
               {matchesModal.loading ? (
                 <div className="text-center py-8 text-gray-400 animate-pulse">Loading matched donors...</div>
               ) : matchesModal.matches.length === 0 ? (
@@ -412,7 +492,7 @@ export default function HospitalDashboard() {
                         {m.age && <span>Age: {m.age}</span>}
                       </div>
                     </div>
-                    <button onClick={() => handleAssignDonor(m._id, m.type)}
+                    <button onClick={() => handleAssignDonor(m.barcodeId || m._id, m.type, m.contact || null)}
                       className="px-5 py-2.5 bg-lifered-600 hover:bg-lifered-500 rounded-xl text-sm font-bold text-white transition-colors shrink-0">
                       Assign
                     </button>

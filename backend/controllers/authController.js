@@ -10,7 +10,7 @@ const generateToken = (id) => {
 // @route   POST /api/auth/register
 const registerUser = async (req, res) => {
   try {
-    const { name, email, password, role, bloodGroup, latitude, longitude } = req.body;
+    const { name, email, contact, age, password, role, bloodGroup, latitude, longitude } = req.body;
 
     // Check if user exists
     const userExists = await User.findOne({ email });
@@ -26,6 +26,8 @@ const registerUser = async (req, res) => {
     const userData = {
       name,
       email,
+      contact,
+      age: age ? parseInt(age) : undefined,
       password: hashedPassword,
       role,
       location: {
@@ -64,7 +66,12 @@ const loginUser = async (req, res) => {
   try {
     const { email, password } = req.body;
 
-    const user = await User.findOne({ email });
+    const user = await User.findOne({ 
+      $or: [
+        { email: email },
+        { contact: email }
+      ]
+    });
 
     if (user && (await bcrypt.compare(password, user.password))) {
       res.json({
