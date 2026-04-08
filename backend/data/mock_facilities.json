@@ -1,0 +1,81 @@
+﻿[
+    {
+        "hfrFacilityId":  "HFR-DEL-778",
+        "role":  "Hospital",
+        "name":  "Apex City Hospital",
+        "email":  "hfr-del-778@lifelink.hfr",
+        "contact":  "+91 90000 11000",
+        "address":  "Ring Road, New Delhi, Delhi 110024",
+        "coordinates":  [
+                            77.2167,
+                            28.6448
+                        ],
+        "licenseStatus":  "Active",
+        "verificationBadge":  "Verified by NHA",
+        "facilityType":  "Multi-Specialty Hospital"
+    },
+    {
+        "hfrFacilityId":  "HFR-BLR-221",
+        "role":  "Hospital",
+        "name":  "Metro Lifeline Centre",
+        "email":  "hfr-blr-221@lifelink.hfr",
+        "contact":  "+91 90300 21000",
+        "address":  "Indiranagar, Bengaluru, Karnataka 560038",
+        "coordinates":  [
+                            77.6408,
+                            12.9784
+                        ],
+        "licenseStatus":  "Active",
+        "verificationBadge":  "Verified by NHA",
+        "facilityType":  "Emergency and Trauma Center"
+    },
+    {
+        "hfrFacilityId":  "BB-HFR-112",
+        "dcgiLicenseNumber":  "DCGI-BB-2026-014",
+        "role":  "Blood Bank",
+        "name":  "Sanjeevani Blood Centre",
+        "email":  "dcgi-bb-2026-014@lifelink.bb",
+        "contact":  "+91 98100 44110",
+        "address":  "Civil Lines, Jaipur, Rajasthan 302006",
+        "coordinates":  [
+                            75.7873,
+                            26.9124
+                        ],
+        "licenseStatus":  "Active",
+        "verificationBadge":  "Verified by NHA",
+        "facilityType":  "Regional Blood Centre",
+        "license_type":  "DCGI_Verified"
+    },
+    {
+        "hfrFacilityId":  "BB-HFR-113",
+        "dcgiLicenseNumber":  "DCGI-BB-2026-099",
+        "role":  "Blood Bank",
+        "name":  "Riverfront Plasma Point",
+        "email":  "dcgi-bb-2026-099@lifelink.bb",
+        "contact":  "+91 98100 55220",
+        "address":  "Ahmedabad, Gujarat 380009",
+        "coordinates":  [
+                            72.5714,
+                            23.0225
+                        ],
+        "licenseStatus":  "Provisional",
+        "verificationBadge":  "Verification Pending",
+        "facilityType":  "Blood Storage Unit",
+        "license_type":  "Provisional"
+    },
+    {
+        "hfrFacilityId":  "lilavati@hfr",
+        "role":  "Hospital",
+        "name":  "Lilavati Hospital",
+        "email":  "lilavati@lifelink.hfr",
+        "contact":  "+91 99800 22011",
+        "address":  "Bandra West, Mumbai, Maharashtra 400050",
+        "coordinates":  [
+                            72.8265,
+                            19.0596
+                        ],
+        "licenseStatus":  "Active",
+        "verificationBadge":  "Verified by NHA",
+        "facilityType":  "Tertiary Care Hospital"
+    }
+]

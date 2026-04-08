@@ -1,0 +1,48 @@
+﻿{
+  "resourceType": "Bundle",
+  "type": "collection",
+  "entry": [
+    {
+      "resource": {
+        "resourceType": "Observation",
+        "id": "obs-neel-malaria-negative",
+        "status": "final",
+        "code": { "text": "Malaria Antigen Test" },
+        "subject": { "identifier": { "system": "https://healthid.ndhm.gov.in", "value": "neel@abha" } },
+        "effectiveDateTime": "2026-03-19T09:00:00Z",
+        "valueString": "Negative"
+      }
+    },
+    {
+      "resource": {
+        "resourceType": "Observation",
+        "id": "obs-malaria-positive-user",
+        "status": "final",
+        "code": { "text": "Malaria Rapid Test" },
+        "subject": { "identifier": { "system": "https://healthid.ndhm.gov.in", "value": "malaria@abha" } },
+        "effectiveDateTime": "2026-03-29T10:00:00Z",
+        "valueString": "Positive"
+      }
+    },
+    {
+      "resource": {
+        "resourceType": "Procedure",
+        "id": "proc-blood-donation-neel",
+        "status": "completed",
+        "code": { "text": "Blood Donation" },
+        "subject": { "identifier": { "system": "https://healthid.ndhm.gov.in", "value": "neel@abha" } },
+        "performedDateTime": "2025-11-01T08:00:00Z"
+      }
+    },
+    {
+      "resource": {
+        "resourceType": "Procedure",
+        "id": "proc-blood-donation-malaria",
+        "status": "completed",
+        "code": { "text": "Blood Donation" },
+        "subject": { "identifier": { "system": "https://healthid.ndhm.gov.in", "value": "malaria@abha" } },
+        "performedDateTime": "2026-03-20T08:00:00Z"
+      }
+    }
+  ]
+}

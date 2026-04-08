@@ -1,13 +1,37 @@
-const express = require('express');
+﻿const express = require('express');
 const router = express.Router();
-const { registerUser, loginUser } = require('../controllers/authController');
+const {
+  registerUser,
+  loginUser,
+  initiateGatewayLogin,
+  completeGatewayLogin,
+  registerMockAbha,
+  registerFacilityOnboarding,
+  completeTieredProfile,
+  updateCurrentLocation,
+} = require('../controllers/authController');
 const { protect } = require('../middleware/authMiddleware');
-const { registerSchema, loginSchema, validateRequestContext } = require('../validation/authValidation');
+const {
+  registerSchema,
+  loginSchema,
+  gatewayLoginSchema,
+  mockAbhaRegisterSchema,
+  completeProfileSchema,
+  facilityOnboardingSchema,
+  updateLocationSchema,
+  validateRequestContext,
+} = require('../validation/authValidation');
 
 router.post('/register', validateRequestContext(registerSchema), registerUser);
 router.post('/login', validateRequestContext(loginSchema), loginUser);
+router.post('/gateway-login/initiate', validateRequestContext(gatewayLoginSchema), initiateGatewayLogin);
+router.post('/gateway-login/complete', validateRequestContext(gatewayLoginSchema), completeGatewayLogin);
+router.post('/mock-abdm/register', validateRequestContext(mockAbhaRegisterSchema), registerMockAbha);
+router.post('/mock-abdm/signup', validateRequestContext(mockAbhaRegisterSchema), registerMockAbha);
+router.post('/mock-abdm/facility-onboarding', validateRequestContext(facilityOnboardingSchema), registerFacilityOnboarding);
+router.post('/complete-profile', protect, validateRequestContext(completeProfileSchema), completeTieredProfile);
+router.patch('/location', protect, validateRequestContext(updateLocationSchema), updateCurrentLocation);
 
-// Get current user profile based on auth token
 router.get('/me', protect, (req, res) => {
   res.json(req.user);
 });

@@ -1,515 +1,502 @@
 'use client';
 
-import { useState, useEffect, useMemo } from 'react';
+import { useEffect, useMemo, useState, useSyncExternalStore } from 'react';
 import axios from 'axios';
 import { io } from 'socket.io-client';
-import { Building2, AlertCircle, MapPin, CheckCircle, Users, Plus, UserSearch, History } from 'lucide-react';
+import { motion } from 'framer-motion';
+import {
+  Activity,
+  ArrowUpRight,
+  BadgeCheck,
+  BellRing,
+  BrainCircuit,
+  Building2,
+  Download,
+  Droplets,
+  MapPinned,
+  Search,
+  ShieldCheck,
+  Siren,
+  Users,
+} from 'lucide-react';
+import PredictiveDemandChart from '../../../components/PredictiveDemandChart';
+import { useDpi } from '../../../components/providers/DpiProvider';
+import { Badge } from '../../../components/ui/badge';
+import { Button } from '../../../components/ui/button';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../../../components/ui/card';
+
+function subscribe() {
+  return () => {};
+}
 
 export default function HospitalDashboard() {
-  const [user, setUser] = useState(null);
-  const [activeTab, setActiveTab] = useState('requests');
+  const { proofs, summonEvents, markSummonStarted, markSummonComplete } = useDpi();
+  const isClient = useSyncExternalStore(subscribe, () => true, () => false);
+  const gatewayUser = useMemo(() => {
+    if (!isClient) {
+      return null;
+    }
+    try {
+      return JSON.parse(localStorage.getItem('user') || 'null');
+    } catch {
+      return null;
+    }
+  }, [isClient]);
+  const token = useMemo(() => {
+    if (!isClient) {
+      return null;
+    }
+    return localStorage.getItem('token');
+  }, [isClient]);
+  const [activeSummon, setActiveSummon] = useState(null);
+  const [liveFeed, setLiveFeed] = useState([]);
+  const [requestDraft, setRequestDraft] = useState({ bloodGroup: 'O-', urgency: 'Critical' });
+  const [requesting, setRequesting] = useState(false);
+  const [requestResult, setRequestResult] = useState(null);
+  const [lookupAbha, setLookupAbha] = useState('neel@abha');
+  const [lookupProfile, setLookupProfile] = useState(null);
+  const [lookupLoading, setLookupLoading] = useState(false);
+  const [ledger, setLedger] = useState({ entries: [] });
+  const [statusMessage, setStatusMessage] = useState('');
 
-  // All requests (active + completed)
-  const [requests, setRequests] = useState([]);
-  const [notifications, setNotifications] = useState([]);
+  const gatewayUserId = gatewayUser?._id || null;
+  const latestProof = proofs[0];
+  const latestLiveSignal = liveFeed[0];
+  const issueBloodEnabled = gatewayUser?.role !== 'Blood Bank' || gatewayUser?.license_type === 'DCGI_Verified';
 
-  // Match Assignment Modal
-  const [matchesModal, setMatchesModal] = useState({ isOpen: false, requestId: null, bloodGroup: '', matches: [], loading: false });
-
-  // Internal DB
-  const [internalDonors, setInternalDonors] = useState([]);
-  const [dbModal, setDbModal] = useState(false);
-  const [newDonor, setNewDonor] = useState({
-    name: '', age: '', bloodGroup: 'A+', contact: '', barcodeId: '', donationHistory: '', isAvailable: true, donatedIn90Days: false, lastDonationDate: '', is_eligible: true
-  });
-
-  // Split requests into active pipeline vs history
-  const activeRequests = useMemo(() => requests.filter(r => r.status === 'Pending' || r.status === 'Accepted'), [requests]);
-  const historyRequests = useMemo(() => requests.filter(r => r.status === 'Fulfilled' || r.status === 'Closed'), [requests]);
+  const summaryItems = useMemo(() => ([
+    {
+      label: gatewayUser?.role === 'Blood Bank' ? 'DCGI License' : 'HFR Facility ID',
+      value: gatewayUser?.dcgiLicenseNumber || gatewayUser?.hfrFacilityId || 'Unavailable',
+      tone: 'text-[#8bc0ff]',
+    },
+    {
+      label: 'Current Region',
+      value: gatewayUser?.currentRegion || 'south-zone',
+      tone: 'text-emerald-300',
+    },
+    {
+      label: 'Ledger Entries',
+      value: String(ledger.entries?.length || 0),
+      tone: 'text-[#ffbf73]',
+    },
+  ]), [gatewayUser, ledger.entries]);
 
   useEffect(() => {
-    const userData = JSON.parse(localStorage.getItem('user'));
-    setUser(userData);
-
-    if (userData) {
-      fetchRequests();
-      fetchInternalDonors();
-
-      const socket = io('http://localhost:5000');
-      socket.emit('join', userData.id);
-
-      socket.on('new-blood-request', (data) => {
-        setNotifications(prev => [data, ...prev.filter(n => n.requestId !== data.requestId)]);
-        fetchRequests();
-      });
-
-      socket.on('donor-accepted-area', (data) => {
-        setNotifications(prev => [data, ...prev.filter(n => n.requestId !== data.requestId)]);
-        fetchRequests();
-      });
-
-      socket.on('request-updated', ({ requestId, status }) => {
-        // Refresh full list so completed moves to history automatically
-        fetchRequests();
-        if (status === 'Accepted') {
-          setNotifications(prev => prev.filter(n => n.requestId !== requestId));
-        }
-      });
-
-      return () => socket.disconnect();
+    if (!gatewayUserId) {
+      return;
     }
-  }, []);
 
-  const fetchRequests = async () => {
-    try {
-      const token = localStorage.getItem('token');
-      // Fetch all requests including completed ones for history
-      const res = await axios.get('http://localhost:5000/api/requests/incoming', {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      setRequests(res.data);
-    } catch (err) { console.error(err); }
+    const socket = io('http://localhost:5000');
+    socket.emit('join', gatewayUserId);
+    socket.emit('join-role', 'facility-command');
+    socket.emit('join-region', gatewayUser.currentRegion || 'south-zone');
+
+    socket.on('donor-live-location', (payload) => {
+      setLiveFeed((prev) => [payload, ...prev].slice(0, 5));
+    });
+
+    return () => socket.disconnect();
+  }, [gatewayUserId, gatewayUser?.currentRegion]);
+
+  useEffect(() => {
+    if (!token || !gatewayUserId) {
+      return;
+    }
+
+    const loadLedger = async () => {
+      try {
+        const res = await axios.get('http://localhost:5000/api/hospital/ledger', {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        setLedger(res.data || { entries: [] });
+      } catch {
+        setLedger({ entries: [] });
+      }
+    };
+
+    loadLedger();
+  }, [gatewayUserId, token]);
+
+  const handleSummon = async (proof) => {
+    setActiveSummon(proof.id);
+    markSummonStarted(proof.id);
+    await new Promise((resolve) => setTimeout(resolve, 1600));
+    markSummonComplete(proof.id);
+    setActiveSummon(null);
   };
 
-  const fetchInternalDonors = async () => {
-    try {
-      const token = localStorage.getItem('token');
-      const res = await axios.get('http://localhost:5000/api/hospital/donors', {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      setInternalDonors(res.data);
-    } catch (err) { console.error(err); }
-  };
+  const handleCreateRequest = async () => {
+    if (!token) {
+      return;
+    }
 
-  const handleUpdateStatus = async (requestId, status) => {
+    setRequesting(true);
+    setStatusMessage('');
     try {
-      const token = localStorage.getItem('token');
-      await axios.put(`http://localhost:5000/api/requests/${requestId}/status`,
-        { status },
-        { headers: { Authorization: `Bearer ${token}` } }
-      );
-      await fetchRequests();
-      setNotifications(prev => prev.filter(n => n.requestId !== requestId));
-    } catch (err) {
-      alert(err.response?.data?.message || 'Failed to update request');
+      const res = await axios.post('http://localhost:5000/api/requests', requestDraft, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      setRequestResult(res.data);
+      setStatusMessage(`Regional alert created. ${res.data.matches?.length || 0} candidates matched in ${gatewayUser?.currentRegion || 'your region'}.`);
+    } catch (error) {
+      setStatusMessage(error.response?.data?.message || 'Regional request creation failed.');
+    } finally {
+      setRequesting(false);
     }
   };
 
-  const openAssignModal = async (req) => {
-    setMatchesModal({ isOpen: true, requestId: req._id, bloodGroup: req.bloodGroup, matches: [], loading: true });
+  const handleLookup = async () => {
+    if (!token) {
+      return;
+    }
+
+    setLookupLoading(true);
+    setStatusMessage('');
     try {
-      const token = localStorage.getItem('token');
-      const res = await axios.get(`http://localhost:5000/api/requests/${req._id}/matches`, {
-        headers: { Authorization: `Bearer ${token}` }
+      const res = await axios.get(`http://localhost:5000/api/hospital/sandbox-profile/${encodeURIComponent(lookupAbha.trim().toLowerCase())}`, {
+        headers: { Authorization: `Bearer ${token}` },
       });
-      setMatchesModal(prev => ({ ...prev, matches: res.data, loading: false }));
-    } catch (err) {
-      alert('Failed to load matches');
-      setMatchesModal({ isOpen: false, requestId: null, bloodGroup: '', matches: [], loading: false });
+      setLookupProfile(res.data);
+    } catch (error) {
+      setLookupProfile(null);
+      setStatusMessage(error.response?.data?.message || 'ABHA profile lookup failed.');
+    } finally {
+      setLookupLoading(false);
     }
   };
 
-  const handleAssignDonor = async (donorId, type, phoneNumber = null) => {
-    try {
-      const token = localStorage.getItem('token');
-      await axios.put(`http://localhost:5000/api/requests/${matchesModal.requestId}/assign`,
-        { assignedDonorId: donorId, assignedDonorType: type, phoneNumber: phoneNumber },
-        { headers: { Authorization: `Bearer ${token}` } }
-      );
-      setMatchesModal({ isOpen: false, requestId: null, bloodGroup: '', matches: [], loading: false });
-      await fetchRequests(); // this will move the request to history
-      alert('✅ Donor assigned. Request moved to History.');
-    } catch (err) {
-      alert(err.response?.data?.message || 'Failed to assign donor');
+  const handleLedgerIntake = async () => {
+    if (!token || !lookupProfile) {
+      return;
     }
-  };
 
-  const handleAssignManual = async (manualId, manualPhone) => {
+    setStatusMessage('');
     try {
-      const token = localStorage.getItem('token');
-      await axios.put(`http://localhost:5000/api/requests/${matchesModal.requestId}/assign`,
-        { assignedDonorId: manualId, phoneNumber: manualPhone },
-        { headers: { Authorization: `Bearer ${token}` } }
-      );
-      setMatchesModal({ isOpen: false, requestId: null, bloodGroup: '', matches: [], loading: false });
-      await fetchRequests(); // this will move the request to history
-      alert('✅ Donor manually assigned. Request moved to History.');
-    } catch (err) {
-      alert(err.response?.data?.message || 'Failed to assign donor manually');
-    }
-  };
-
-  const handleAddDonor = async (e) => {
-    e.preventDefault();
-    try {
-      const token = localStorage.getItem('token');
-      const res = await axios.post('http://localhost:5000/api/hospital/donors', newDonor, {
-        headers: { Authorization: `Bearer ${token}` }
+      const res = await axios.post('http://localhost:5000/api/hospital/ledger/intake', {
+        abhaAddress: lookupProfile.abhaAddress,
+      }, {
+        headers: { Authorization: `Bearer ${token}` },
       });
-      setInternalDonors(res.data);
-      setDbModal(false);
-      setNewDonor({ name: '', age: '', bloodGroup: 'A+', contact: '', barcodeId: '', donationHistory: '', isAvailable: true, donatedIn90Days: false, lastDonationDate: '', is_eligible: true });
-    } catch (err) {
-      alert(err.response?.data?.message || 'Failed to add donor');
+      setLedger(res.data);
+      setStatusMessage('Donor added to the facility private ledger.');
+    } catch (error) {
+      setStatusMessage(error.response?.data?.message || 'Could not add donor to the facility ledger.');
     }
   };
 
-  if (!user) return null;
+  const handleExportLedger = async () => {
+    if (!token) {
+      return;
+    }
 
-  const RequestTable = ({ data, showAction }) => (
-    <div className="overflow-x-auto">
-      <table className="w-full text-left border-collapse">
-        <thead>
-          <tr className="border-b border-white/10 text-gray-400 text-sm">
-            <th className="pb-3 px-4 font-medium">Requester</th>
-            <th className="pb-3 px-4 font-medium">Blood Group</th>
-            <th className="pb-3 px-4 font-medium">Urgency</th>
-            <th className="pb-3 px-4 font-medium">Status</th>
-            {showAction && <th className="pb-3 px-4 font-medium text-right">Action</th>}
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-white/5">
-          {data.map(req => (
-            <tr key={req._id} className="hover:bg-white/5 transition-colors">
-              <td className="py-4 px-4 text-white">
-                {req.requester?.name}
-                <br /><span className="text-xs text-gray-500">{new Date(req.createdAt).toLocaleDateString()}</span>
-              </td>
-              <td className="py-4 px-4">
-                <span className="bg-brand-gray px-3 py-1 rounded-full border border-white/10 font-bold text-lifered-400 text-sm">{req.bloodGroup}</span>
-              </td>
-              <td className={`py-4 px-4 text-sm font-medium ${req.urgency === 'Critical' ? 'text-red-400' : 'text-orange-400'}`}>
-                {req.urgency}
-              </td>
-              <td className="py-4 px-4">
-                <span className={`text-xs font-semibold px-2 py-1 rounded-lg ${
-                  req.status === 'Fulfilled' || req.status === 'Closed'
-                    ? 'bg-green-500/20 text-green-400'
-                    : req.status === 'Accepted'
-                    ? 'bg-blue-500/20 text-blue-400'
-                    : 'bg-orange-500/20 text-orange-400'
-                }`}>
-                  {req.status}
-                </span>
-              </td>
-              {showAction && (
-                <td className="py-4 px-4 text-right">
-                  {req.status === 'Pending' ? (
-                    <button onClick={() => handleUpdateStatus(req._id, 'Accepted')}
-                      className="px-3 py-1.5 bg-brand-gray hover:bg-white/10 text-white text-xs rounded-lg border border-white/10">
-                      Accept
-                    </button>
-                  ) : req.status === 'Accepted' ? (
-                    <button onClick={() => openAssignModal(req)}
-                      className="px-3 py-1.5 bg-lifered-600 hover:bg-lifered-500 text-white text-xs rounded-lg shadow-lg">
-                      Assign Donor
-                    </button>
-                  ) : null}
-                </td>
-              )}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      {data.length === 0 && (
-        <div className="text-center p-10 text-gray-500">No requests here.</div>
-      )}
-    </div>
-  );
+    try {
+      const res = await axios.get('http://localhost:5000/api/hospital/ledger/export', {
+        headers: { Authorization: `Bearer ${token}` },
+        responseType: 'blob',
+      });
+      const blob = new Blob([res.data], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `${(gatewayUser?.name || 'facility').replace(/\s+/g, '-').toLowerCase()}-drive-data.csv`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      setStatusMessage('Facility ledger exported successfully.');
+    } catch (error) {
+      setStatusMessage(error.response?.data?.message || 'Ledger export failed.');
+    }
+  };
 
   return (
-    <div className="space-y-6">
-      {/* Header */}
-      <div className="flex flex-col md:flex-row justify-between items-start md:items-center bg-brand-gray/40 border border-white/5 rounded-2xl p-6 shadow-xl gap-4">
-        <div>
-          <h1 className="text-2xl font-bold text-white mb-1">{user.role} Dashboard</h1>
-          <p className="text-gray-400">Manage emergency pipelines and your internal donor database.</p>
-        </div>
-        <div className="p-3 bg-lifered-500/10 rounded-xl border border-lifered-500/20 hidden md:block">
-          <Building2 className="h-6 w-6 text-lifered-500" />
-        </div>
-      </div>
-
-      {/* Tabs */}
-      <div className="flex border-b border-white/10 gap-8">
-        {[
-          { key: 'requests', label: 'Active Pipeline', badge: activeRequests.length },
-          { key: 'history', label: 'History', badge: historyRequests.length },
-          { key: 'database', label: 'Internal Donors', icon: <Users className="h-4 w-4" /> }
-        ].map(tab => (
-          <button key={tab.key}
-            className={`pb-4 text-sm font-semibold transition-colors flex items-center gap-2 relative ${activeTab === tab.key ? 'text-white border-b-2 border-lifered-500' : 'text-gray-400 hover:text-gray-200'}`}
-            onClick={() => setActiveTab(tab.key)}>
-            {tab.icon || null}
-            {tab.label}
-            {tab.badge > 0 && (
-              <span className={`px-1.5 py-0.5 text-[10px] rounded-full font-bold ${tab.key === 'requests' ? 'bg-lifered-500 text-white' : 'bg-white/10 text-gray-300'}`}>
-                {tab.badge}
-              </span>
-            )}
-          </button>
-        ))}
-      </div>
-
-      {/* Active Requests Tab */}
-      {activeTab === 'requests' && (
-        <div className="space-y-6 animate-fade-in">
-          {/* Live Alerts */}
-          {notifications.length > 0 && (
-            <div className="space-y-3">
-              <h2 className="text-lg font-bold flex items-center gap-2 text-white">
-                <AlertCircle className="h-5 w-5 text-lifered-500" /> Live Emergency Alerts
-              </h2>
-              {notifications.map((notif, i) => (
-                <div key={i} className="glass border-lifered-500/30 p-4 rounded-xl flex justify-between items-center shadow-lg">
-                  <div className="flex items-start gap-4">
-                    <div className="p-2 bg-lifered-500/20 rounded-lg shrink-0">
-                      <AlertCircle className="h-6 w-6 text-lifered-500 animate-pulse" />
-                    </div>
-                    <div className="flex-1">
-                      <p className="font-semibold text-white">{notif.message}</p>
-                      {notif.donorDetails ? (
-                        <div className="mt-2 text-sm text-gray-300 flex items-center flex-wrap gap-2">
-                          <span className="bg-brand-dark px-2 py-1 rounded-full text-lifered-400 font-bold border border-white/5">{notif.donorDetails.bloodGroup || 'Type Unspecified'}</span>
-                          <span className="font-semibold">{notif.donorDetails.name}</span>
-                          {notif.donorDetails.age && <span className="text-gray-400">({notif.donorDetails.age} yrs)</span>}
-                          {notif.donorDetails.contact && <span className="text-gray-400 font-mono text-xs bg-brand-gray/50 px-2 py-0.5 rounded border border-white/10">{notif.donorDetails.contact}</span>}
-                        </div>
-                      ) : (
-                        <p className="text-sm text-lifered-400 mt-1 flex items-center gap-1">
-                          <MapPin className="h-3 w-3" /> {Number(notif.distance).toFixed(1)} km • {notif.urgency} Urgency
-                        </p>
-                      )}
-                    </div>
-                  </div>
-                  {notif.donorName ? (
-                    <button onClick={() => openAssignModal({ _id: notif.requestId, bloodGroup: 'Any' })}
-                      className="px-5 py-2 bg-green-600 hover:bg-green-500 text-white rounded-lg font-medium text-sm transition-colors">
-                      Verify & Accept Donor
-                    </button>
-                  ) : (
-                    <button onClick={() => handleUpdateStatus(notif.requestId, 'Accepted')}
-                      className="px-5 py-2 bg-lifered-600 hover:bg-lifered-500 text-white rounded-lg font-medium text-sm transition-colors">
-                      Claim Request
-                    </button>
-                  )}
+    <div className="space-y-8">
+      <Card className="overflow-hidden border-[#0b4ea2]/25">
+        <CardContent className="grid-shell relative grid gap-6 p-8 lg:grid-cols-[1.2fr_0.8fr]">
+          <div className="absolute left-0 top-0 h-full w-full bg-[radial-gradient(circle_at_top_right,rgba(255,143,31,0.16),transparent_26%),radial-gradient(circle_at_bottom_left,rgba(11,78,162,0.18),transparent_34%)]" />
+          <div className="relative">
+            <div className="mb-4 flex flex-wrap items-center gap-3">
+              <Badge variant="blue" className="mb-0">
+                <Building2 className="h-3.5 w-3.5" />
+                {gatewayUser?.role === 'Blood Bank' ? 'Blood Bank Command Center' : 'Hospital Command Center'}
+              </Badge>
+              {gatewayUser?.verificationBadge && (
+                <Badge variant="success">
+                  <BadgeCheck className="h-3.5 w-3.5" />
+                  {gatewayUser.verificationBadge}
+                </Badge>
+              )}
+            </div>
+            <h1 className="text-3xl font-semibold text-white sm:text-4xl">Regional dispatch and facility-owned donor CRM</h1>
+            <p className="mt-4 max-w-2xl text-sm leading-7 text-slate-300">This command center creates Red Alerts directly over Socket.io, receives live donor coordinates after ZK-backed clearance, and stores every drive in a private facility ledger.</p>
+            <div className="mt-7 grid gap-4 sm:grid-cols-3">
+              {summaryItems.map((item) => (
+                <div key={item.label} className="rounded-[1.35rem] border border-white/10 bg-white/6 p-4">
+                  <p className="text-xs uppercase tracking-[0.18em] text-slate-400">{item.label}</p>
+                  <p className={`mt-2 text-lg font-semibold ${item.tone}`}>{item.value}</p>
                 </div>
               ))}
             </div>
-          )}
-
-          <div className="glass-dark border border-white/5 p-6 rounded-2xl">
-            <h2 className="text-xl font-bold mb-6">Active Pipeline</h2>
-            <RequestTable data={activeRequests} showAction={true} />
           </div>
-        </div>
-      )}
 
-      {/* History Tab */}
-      {activeTab === 'history' && (
-        <div className="animate-fade-in">
-          <div className="glass-dark border border-white/5 p-6 rounded-2xl">
-            <h2 className="text-xl font-bold mb-6 flex items-center gap-2">
-              <History className="h-5 w-5 text-green-400" /> Completed Requests
-            </h2>
-            <RequestTable data={historyRequests} showAction={false} />
-          </div>
-        </div>
-      )}
-
-      {/* Database Tab */}
-      {activeTab === 'database' && (
-        <div className="animate-fade-in">
-          <div className="flex justify-between items-center mb-6">
-            <h2 className="text-xl font-bold">Your Saved Donors</h2>
-            <button onClick={() => setDbModal(true)}
-              className="flex items-center gap-2 px-4 py-2 bg-brand-gray hover:bg-white/10 text-white rounded-xl text-sm font-medium border border-white/10">
-              <Plus className="h-4 w-4" /> Add Donor
-            </button>
-          </div>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            {internalDonors.map(donor => (
-              <div key={donor._id} className="glass-card p-5 rounded-2xl border border-white/5">
-                <div className="flex justify-between items-start mb-2">
-                  <span className="font-bold text-white text-lg">{donor.name}</span>
-                  <span className="bg-brand-dark px-2 py-1 rounded-full text-lifered-400 text-xs font-bold border border-white/5">{donor.bloodGroup}</span>
-                </div>
-                <div className="space-y-1 mt-2">
-                  <p className="text-gray-400 text-xs">Age: <span className="text-white">{donor.age}</span></p>
-                  <p className="text-gray-400 text-xs">Contact: <span className="text-white">{donor.contact}</span></p>
-                  <p className="text-gray-400 text-xs">Barcode: <span className="text-blue-400 font-mono">{donor.barcodeId}</span></p>
-                  {donor.donationHistory && <p className="text-gray-400 text-xs">History: {donor.donationHistory}</p>}
-                </div>
-                <div className="mt-4 pt-4 border-t border-white/5">
-                  <span className="text-xs">{donor.isAvailable ? <span className="text-green-400">✓ Available</span> : <span className="text-red-400">✗ Unavailable</span>}</span>
-                </div>
+          <div className="relative rounded-[1.7rem] border border-[#ff8f1f]/25 bg-[linear-gradient(180deg,rgba(255,143,31,0.16),rgba(255,143,31,0.05))] p-6">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-xs uppercase tracking-[0.26em] text-[#ffd19e]">AI Foresight</p>
+                <h2 className="mt-3 text-xl font-semibold text-white">Predicted dengue-driven O-ve spike</h2>
               </div>
-            ))}
-            {internalDonors.length === 0 && (
-              <div className="col-span-3 text-center p-12 glass-dark rounded-2xl">
-                <p className="text-gray-500">No internal donors yet. Click "Add Donor" to get started.</p>
+              <div className="rounded-2xl bg-slate-950/25 p-3">
+                <BrainCircuit className="h-6 w-6 text-[#ffbf73]" />
+              </div>
+            </div>
+            <p className="mt-3 text-sm leading-6 text-slate-100">The command center prioritizes O-ve inventory staging and summons pre-cleared donors before the demand curve peaks.</p>
+            {gatewayUser?.facilityAddress && (
+              <div className="mt-4 rounded-2xl border border-white/10 bg-slate-950/25 p-4 text-sm text-slate-200">
+                Verified address: {gatewayUser.facilityAddress}
+              </div>
+            )}
+            {gatewayUser?.role === 'Blood Bank' && (
+              <div className={`mt-4 rounded-2xl border p-4 text-sm ${issueBloodEnabled ? 'border-emerald-400/25 bg-emerald-500/10 text-emerald-100' : 'border-amber-400/25 bg-amber-500/10 text-amber-100'}`}>
+                {issueBloodEnabled ? 'DCGI_Verified license detected. Issue Blood workflow is enabled.' : 'Issue Blood is locked until license_type is DCGI_Verified.'}
               </div>
             )}
           </div>
-        </div>
-      )}
+        </CardContent>
+      </Card>
 
-      {/* Add Donor Modal */}
-      {dbModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
-          <div className="bg-brand-dark border border-white/10 p-6 rounded-2xl w-full max-w-lg shadow-2xl">
-            <h3 className="text-xl font-bold text-white mb-6">Add Internal Donor</h3>
-            <form onSubmit={handleAddDonor} className="space-y-4">
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-sm font-medium text-gray-400 mb-1">Full Name <span className="text-red-400">*</span></label>
-                  <input required type="text" placeholder="e.g. John Doe"
-                    suppressHydrationWarning
-                    className="w-full bg-brand-gray border border-white/10 rounded-xl p-3 text-white outline-none text-sm"
-                    value={newDonor.name} onChange={(e) => setNewDonor({ ...newDonor, name: e.target.value })} />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-400 mb-1">Age <span className="text-red-400">*</span></label>
-                  <input required type="number" min="18" max="65" placeholder="e.g. 28"
-                    suppressHydrationWarning
-                    className="w-full bg-brand-gray border border-white/10 rounded-xl p-3 text-white outline-none text-sm"
-                    value={newDonor.age} onChange={(e) => setNewDonor({ ...newDonor, age: e.target.value })} />
-                </div>
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-sm font-medium text-gray-400 mb-1">Blood Group <span className="text-red-400">*</span></label>
-                  <select required className="w-full bg-brand-gray border border-white/10 rounded-xl p-3 text-white outline-none text-sm"
-                    suppressHydrationWarning
-                    value={newDonor.bloodGroup} onChange={(e) => setNewDonor({ ...newDonor, bloodGroup: e.target.value })}>
-                    {['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-'].map(bg => <option key={bg} value={bg}>{bg}</option>)}
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-400 mb-1">Contact <span className="text-red-400">*</span></label>
-                  <input required type="text" placeholder="Phone / Email"
-                    suppressHydrationWarning
-                    className="w-full bg-brand-gray border border-white/10 rounded-xl p-3 text-white outline-none text-sm"
-                    value={newDonor.contact} onChange={(e) => setNewDonor({ ...newDonor, contact: e.target.value })} />
-                </div>
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-400 mb-1">Barcode / Donor ID <span className="text-red-400">*</span></label>
-                <input required type="text" placeholder="e.g. DON-2026-00381"
-                  suppressHydrationWarning
-                  className="w-full bg-brand-gray border border-white/10 rounded-xl p-3 text-white outline-none text-sm font-mono"
-                  value={newDonor.barcodeId} onChange={(e) => setNewDonor({ ...newDonor, barcodeId: e.target.value })} />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-400 mb-1">Donated in last 90 days? <span className="text-red-400">*</span></label>
-                <select 
-                  className="w-full bg-brand-gray border border-white/10 rounded-xl p-3 text-white outline-none text-sm"
-                  value={newDonor.donatedIn90Days ? 'Yes' : 'No'}
-                  onChange={(e) => setNewDonor({ ...newDonor, donatedIn90Days: e.target.value === 'Yes', is_eligible: e.target.value === 'No' })}
-                >
-                  <option value="No">No</option>
-                  <option value="Yes">Yes</option>
-                </select>
-              </div>
-              {newDonor.donatedIn90Days && (
-                <div>
-                  <label className="block text-sm font-medium text-gray-400 mb-1">Last Donation Date <span className="text-red-400">*</span></label>
-                  <input required type="date"
-                    suppressHydrationWarning
-                    className="w-full bg-brand-gray border border-white/10 rounded-xl p-3 text-white outline-none text-sm"
-                    value={newDonor.lastDonationDate} onChange={(e) => setNewDonor({ ...newDonor, lastDonationDate: e.target.value })} />
-                </div>
-              )}
-              <div>
-                <label className="block text-sm font-medium text-gray-400 mb-1">Donation History <span className="text-gray-600 text-xs">(optional)</span></label>
-                <input type="text" placeholder="e.g. 3 donations, last in Jan 2025"
-                  suppressHydrationWarning
-                  className="w-full bg-brand-gray border border-white/10 rounded-xl p-3 text-white outline-none text-sm"
-                  value={newDonor.donationHistory} onChange={(e) => setNewDonor({ ...newDonor, donationHistory: e.target.value })} />
-              </div>
-              <div className="flex gap-3 pt-2">
-                <button type="button" onClick={() => setDbModal(false)} className="flex-1 py-3 text-gray-400 hover:text-white transition-colors">Cancel</button>
-                <button type="submit" className="flex-1 py-3 bg-lifered-600 hover:bg-lifered-500 text-white rounded-xl font-medium">Save Donor</button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
+      <div className="grid gap-6 xl:grid-cols-[1.15fr_0.85fr]">
+        <Card>
+          <CardHeader>
+            <Badge variant="saffron">
+              <BrainCircuit className="h-3.5 w-3.5" />
+              Predictive Demand Dashboard
+            </Badge>
+            <CardTitle>O-ve demand expected to surge within the next 24 hours</CardTitle>
+            <CardDescription>Simulated outbreak intelligence pushes the command center into proactive donor mobilization.</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <PredictiveDemandChart />
+          </CardContent>
+        </Card>
 
-      {/* Assign Donor Modal — NO extra input fields, all data from backend */}
-      {matchesModal.isOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm">
-          <div className="bg-brand-dark border border-lifered-500/20 p-6 rounded-2xl w-full max-w-2xl shadow-2xl max-h-[90vh] flex flex-col">
-            <div className="mb-4">
-              <h3 className="text-xl font-bold text-white flex items-center gap-2">
-                <UserSearch className="h-5 w-5 text-lifered-500" /> Select Donor
-              </h3>
-              <p className="text-xs text-gray-500 mt-1">
-                Only compatible, available, eligible donors shown for <span className="text-lifered-400 font-bold">{matchesModal.bloodGroup}</span>
-              </p>
-            </div>
-
-            <div className="flex-1 overflow-y-auto space-y-3 pr-1">
-              {/* Manual Assignment */}
-              <div className="mb-4 flex gap-2 border-b border-white/5 pb-4">
-                 <input type="text" placeholder="Enter Unique ID or Barcode" 
-                   className="flex-1 bg-brand-gray border border-white/10 rounded-xl p-3 text-white text-sm"
-                   id="manual-id" />
-                 <input type="text" placeholder="Enter Phone Number" 
-                   className="flex-1 bg-brand-gray border border-white/10 rounded-xl p-3 text-white text-sm"
-                   id="manual-phone" />
-                 <button onClick={() => {
-                   const manualId = document.getElementById('manual-id').value;
-                   const manualPhone = document.getElementById('manual-phone').value;
-                   if (manualId || manualPhone) handleAssignManual(manualId, manualPhone);
-                 }}
-                   className="px-5 py-3 bg-lifered-600 hover:bg-lifered-500 rounded-xl font-bold text-sm text-white">
-                   Assign Manual
-                 </button>
-              </div>
-
-              {matchesModal.loading ? (
-                <div className="text-center py-8 text-gray-400 animate-pulse">Loading matched donors...</div>
-              ) : matchesModal.matches.length === 0 ? (
-                <div className="text-center py-8 text-orange-400">
-                  No compatible + available + eligible donors found for this request.
-                </div>
-              ) : (
-                matchesModal.matches.map((m, idx) => (
-                  <div key={idx} className={`p-4 rounded-xl border flex justify-between items-center gap-4 ${m.type === 'Internal' ? 'bg-brand-gray/50 border-blue-500/20' : 'glass border-white/5'}`}>
-                    <div className="flex-1">
-                      <div className="flex items-center gap-2 mb-1 flex-wrap">
-                        <span className="font-bold text-white">{m.name}</span>
-                        <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold ${m.type === 'Internal' ? 'bg-blue-500/20 text-blue-400' : 'bg-purple-500/20 text-purple-400'}`}>
-                          {m.type}
-                        </span>
-                        <span className="text-xs bg-brand-dark px-2 rounded-full border border-white/10 text-lifered-400">{m.bloodGroup}</span>
-                        {m.contact && <span className="text-xs text-gray-500">{m.contact}</span>}
-                      </div>
-                      <div className="flex items-center gap-4 text-[11px] text-gray-500">
-                        <span>Priority Score: <span className="text-white font-semibold">{m.score.toFixed(1)}</span></span>
-                        {m.barcodeId && <span>ID: <span className="text-blue-400 font-mono">{m.barcodeId}</span></span>}
-                        {m.age && <span>Age: {m.age}</span>}
-                      </div>
-                    </div>
-                    <button onClick={() => handleAssignDonor(m.barcodeId || m._id, m.type, m.contact || null)}
-                      className="px-5 py-2.5 bg-lifered-600 hover:bg-lifered-500 rounded-xl text-sm font-bold text-white transition-colors shrink-0">
-                      Assign
-                    </button>
+        <Card>
+          <CardHeader>
+            <Badge variant="blue">
+              <ShieldCheck className="h-3.5 w-3.5" />
+              Direct Authorization
+            </Badge>
+            <CardTitle>Pre-Verified Donor Profile</CardTitle>
+            <CardDescription>Identity remains hidden. Only blood group and proof-backed clearance are visible to the facility.</CardDescription>
+          </CardHeader>
+          <CardContent>
+            {latestProof ? (
+              <motion.div layout className="space-y-4 rounded-[1.6rem] border border-emerald-400/28 bg-emerald-500/10 p-5">
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <p className="text-xs uppercase tracking-[0.18em] text-emerald-100/80">Name Hidden</p>
+                    <h3 className="mt-2 text-2xl font-semibold text-white">{latestProof.alias}</h3>
+                    <p className="mt-2 text-sm text-slate-200">{latestProof.destination} / {latestProof.hospitalWing || 'Regional Dispatch'}</p>
                   </div>
-                ))
-              )}
+                  <ShieldCheck className="h-12 w-12 text-emerald-300" />
+                </div>
+
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <div className="rounded-2xl border border-white/10 bg-slate-950/25 p-4">
+                    <p className="text-xs text-slate-400">Blood Group</p>
+                    <p className="mt-2 text-lg font-semibold text-white">{latestProof.bloodGroup}</p>
+                  </div>
+                  <div className="rounded-2xl border border-white/10 bg-slate-950/25 p-4">
+                    <p className="text-xs text-slate-400">ZKP Status</p>
+                    <p className="mt-2 text-sm font-semibold text-emerald-300">{latestProof.zkStatus}</p>
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-white/10 bg-slate-950/25 p-4">
+                  <p className="text-xs text-slate-400">Proof Hash</p>
+                  <p className="mt-2 break-all font-mono text-xs text-[#8bc0ff]">{latestProof.proofHash}</p>
+                </div>
+
+                <Button variant="success" size="lg" className="w-full" onClick={() => handleSummon(latestProof)} disabled={activeSummon === latestProof.id || latestProof.summonStatus === 'dispatched'}>
+                  {activeSummon === latestProof.id ? <><Activity className="h-4 w-4 animate-spin" /> Dispatching to facility ops...</> : latestProof.summonStatus === 'dispatched' ? <><BadgeCheck className="h-4 w-4" /> Verify & Summon Complete</> : <><BellRing className="h-4 w-4" /> Verify & Summon</>}
+                </Button>
+              </motion.div>
+            ) : (
+              <div className="rounded-[1.6rem] border border-dashed border-white/12 bg-white/4 p-8 text-center">
+                <ShieldCheck className="mx-auto h-10 w-10 text-slate-500" />
+                <p className="mt-4 text-sm font-medium text-slate-200">Awaiting donor proof</p>
+                <p className="mt-2 text-sm text-slate-400">Generate a proof from the donor dashboard to populate this pre-verified profile.</p>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      </div>
+
+      <div className="grid gap-6 lg:grid-cols-2">
+        <Card>
+          <CardHeader>
+            <Badge variant="blue">
+              <Siren className="h-3.5 w-3.5" />
+              Regional Broadcast
+            </Badge>
+            <CardTitle>Create a direct region-room Red Alert</CardTitle>
+            <CardDescription>Hospitals and blood banks now broadcast directly to every active donor in the same region.</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid gap-4 sm:grid-cols-2">
+              <select value={requestDraft.bloodGroup} onChange={(e) => setRequestDraft((prev) => ({ ...prev, bloodGroup: e.target.value }))} className="rounded-[1rem] border border-white/10 bg-white/6 px-4 py-3 text-white outline-none">
+                {['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-'].map((group) => (
+                  <option key={group} value={group} className="bg-slate-900">{group}</option>
+                ))}
+              </select>
+              <select value={requestDraft.urgency} onChange={(e) => setRequestDraft((prev) => ({ ...prev, urgency: e.target.value }))} className="rounded-[1rem] border border-white/10 bg-white/6 px-4 py-3 text-white outline-none">
+                {['Critical', 'High', 'Medium'].map((urgency) => (
+                  <option key={urgency} value={urgency} className="bg-slate-900">{urgency}</option>
+                ))}
+              </select>
+            </div>
+            <Button onClick={handleCreateRequest} className="w-full" disabled={requesting}>
+              {requesting ? <><Activity className="h-4 w-4 animate-spin" /> Broadcasting...</> : <><Siren className="h-4 w-4" /> Broadcast Regional Red Alert</>}
+            </Button>
+            {requestResult && (
+              <div className="rounded-[1.4rem] border border-emerald-400/25 bg-emerald-500/10 p-4 text-sm text-emerald-100">
+                Matching engine prepared {requestResult.matches?.length || 0} region-qualified candidates for this request.
+              </div>
+            )}
+            {statusMessage && (
+              <div className="rounded-[1.4rem] border border-amber-400/25 bg-amber-500/10 p-4 text-sm text-amber-100">{statusMessage}</div>
+            )}
+            <div className="rounded-[1.4rem] border border-white/10 bg-white/5 p-4 text-sm text-slate-300">
+              Socket room: <span className="font-semibold text-white">{gatewayUser?.currentRegion || 'south-zone'}</span>
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <Badge variant="blue">
+              <MapPinned className="h-3.5 w-3.5" />
+              Live Donor Tracking
+            </Badge>
+            <CardTitle>Real-time donor coordinates and ETA</CardTitle>
+            <CardDescription>Live location arrives immediately after a donor clears the 90-day history and proof checks.</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {liveFeed.length > 0 ? liveFeed.map((item, index) => (
+              <div key={`${item.donorAlias}-${index}`} className="rounded-[1.4rem] border border-white/10 bg-white/5 p-4">
+                <p className="text-sm font-semibold text-white">{item.donorAlias} • {item.abhaStatus}</p>
+                <p className="mt-2 text-sm text-slate-300">{item.requestTitle}</p>
+                <p className="mt-2 text-xs text-slate-400">ETA {item.etaMinutes} min • {item.coordinates.latitude}, {item.coordinates.longitude}</p>
+              </div>
+            )) : (
+              <div className="rounded-[1.4rem] border border-dashed border-white/12 bg-white/4 p-6 text-sm text-slate-400">No live donor coordinates yet. Accept a request from the citizen dashboard to stream the feed here.</div>
+            )}
+          </CardContent>
+        </Card>
+      </div>
+
+      <div className="grid gap-6 lg:grid-cols-[0.95fr_1.05fr]">
+        <Card>
+          <CardHeader>
+            <Badge variant="blue">
+              <Users className="h-3.5 w-3.5" />
+              Facility CRM
+            </Badge>
+            <CardTitle>Drive intake and private donor ledger</CardTitle>
+            <CardDescription>Facilities can fetch mock ABHA profiles and add them to a ledger owned only by that facility.</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="flex gap-3">
+              <input value={lookupAbha} onChange={(e) => setLookupAbha(e.target.value)} placeholder="Enter ABHA ID" className="flex-1 rounded-[1rem] border border-white/10 bg-white/6 px-4 py-3 text-white placeholder:text-slate-400 outline-none" />
+              <Button onClick={handleLookup} disabled={lookupLoading}>
+                {lookupLoading ? <Activity className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
+                Lookup
+              </Button>
             </div>
 
-            <div className="pt-4 border-t border-white/5 text-right mt-4">
-              <button onClick={() => setMatchesModal({ isOpen: false, requestId: null, bloodGroup: '', matches: [], loading: false })}
-                className="px-6 py-2 text-gray-400 hover:text-white transition-colors">
-                Cancel
-              </button>
+            {lookupProfile && (
+              <div className="rounded-[1.4rem] border border-white/10 bg-white/5 p-4">
+                <p className="text-sm font-semibold text-white">{lookupProfile.name} • {lookupProfile.abhaAddress}</p>
+                <p className="mt-2 text-sm text-slate-300">{lookupProfile.bloodGroup || 'Blood group pending'} • {lookupProfile.verificationTier}</p>
+                <p className="mt-2 text-xs text-slate-400">Verification source: {lookupProfile.verificationSourceId || 'Not supplied'} • Region: {lookupProfile.currentRegion}</p>
+                <Button onClick={handleLedgerIntake} className="mt-4 w-full">
+                  <Droplets className="h-4 w-4" />
+                  Add to Facility Ledger
+                </Button>
+              </div>
+            )}
+
+            <div className="rounded-[1.4rem] border border-white/10 bg-white/5 p-4">
+              <div className="mb-4 flex items-center justify-between gap-3">
+                <div>
+                  <p className="text-sm font-semibold text-white">Private Ledger</p>
+                  <p className="mt-1 text-xs text-slate-400">{ledger.entries?.length || 0} donors added during this drive.</p>
+                </div>
+                <Button variant="secondary" onClick={handleExportLedger} className="bg-white/10 text-white hover:bg-white/15">
+                  <Download className="h-4 w-4" />
+                  Export
+                </Button>
+              </div>
+              <div className="space-y-3">
+                {(ledger.entries?.length || 0) > 0 ? ledger.entries.slice(0, 5).map((entry) => (
+                  <div key={entry._id || entry.abhaAddress} className="rounded-[1rem] border border-white/10 bg-slate-950/25 p-3">
+                    <p className="text-sm font-semibold text-white">{entry.donorName}</p>
+                    <p className="mt-1 text-xs text-slate-300">{entry.abhaAddress} • {entry.bloodGroup || 'Pending group'}</p>
+                    <p className="mt-1 text-xs text-slate-400">{entry.verificationTier}</p>
+                  </div>
+                )) : (
+                  <div className="rounded-[1rem] border border-dashed border-white/12 bg-white/4 p-4 text-sm text-slate-400">No donors have been added to this facility ledger yet.</div>
+                )}
+              </div>
             </div>
-          </div>
-        </div>
-      )}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <Badge variant="saffron">
+              <ArrowUpRight className="h-3.5 w-3.5" />
+              Dispatch Layer
+            </Badge>
+            <CardTitle>Regional dispatch and summon audit</CardTitle>
+            <CardDescription>Summon actions are logged locally while the live donor ETA stream keeps updating.</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="rounded-[1.6rem] border border-white/10 bg-slate-950/30 p-5">
+              <div className="flex items-center justify-between gap-4 border-b border-white/10 pb-4">
+                <div>
+                  <p className="text-xs uppercase tracking-[0.18em] text-slate-400">Destination</p>
+                  <p className="mt-2 text-base font-semibold text-white">{latestProof?.destination || gatewayUser?.name || 'Regional Facility'}</p>
+                </div>
+                <ArrowUpRight className="h-5 w-5 text-[#8bc0ff]" />
+              </div>
+
+              <div className="space-y-4 pt-4 text-sm text-slate-200">
+                <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+                  <p className="text-xs uppercase tracking-[0.18em] text-slate-400">Latest Live ETA</p>
+                  <p className="mt-2 leading-6">{latestLiveSignal ? `${latestLiveSignal.donorAlias} arriving in ${latestLiveSignal.etaMinutes} minutes for ${latestLiveSignal.requestTitle}.` : 'Awaiting a donor acceptance event from the regional room.'}</p>
+                </div>
+                <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+                  <p className="text-xs uppercase tracking-[0.18em] text-slate-400">Route Link</p>
+                  <p className="mt-2 break-all font-mono text-xs text-[#8bc0ff]">{latestProof?.mapLink || 'https://maps.google.com/?q=Apex+City+Hospital'}</p>
+                </div>
+                <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+                  <p className="text-xs uppercase tracking-[0.18em] text-slate-400">Summon Audit</p>
+                  {(summonEvents.length > 0) ? (
+                    <div className="mt-2 space-y-2">
+                      {summonEvents.slice(0, 3).map((event) => (
+                        <p key={event.id} className="text-sm text-slate-200">{event.message}</p>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="mt-2 text-sm font-semibold text-emerald-300">ZKP clearance valid, donor identity withheld, summon ready.</p>
+                  )}
+                </div>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
     </div>
   );
 }

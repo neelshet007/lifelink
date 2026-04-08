@@ -1,40 +1,46 @@
-'use client';
+﻿'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useSyncExternalStore } from 'react';
 import { useRouter } from 'next/navigation';
-import { Activity, LogOut } from 'lucide-react';
+import { Activity, BadgeCheck, Building2, LogOut, Shield, ShieldCheck, User } from 'lucide-react';
 import Link from 'next/link';
+import { useDpi } from '../../components/providers/DpiProvider';
+import { Badge } from '../../components/ui/badge';
+
+function subscribe() {
+  return () => {};
+}
 
 export default function DashboardLayout({ children }) {
   const router = useRouter();
-  const [user, setUser] = useState(null);
-  const [mounted, setMounted] = useState(false);
+  const { clearSession } = useDpi();
+  const isClient = useSyncExternalStore(subscribe, () => true, () => false);
+  const token = isClient ? localStorage.getItem('token') : null;
+  const user = isClient ? JSON.parse(localStorage.getItem('user') || 'null') : null;
 
   useEffect(() => {
-    setMounted(true);
-    const token = localStorage.getItem('token');
-    const userData = localStorage.getItem('user');
-    
-    if (!token || !userData) {
+    if (isClient && (!token || !user)) {
       router.push('/login');
-    } else {
-      setUser(JSON.parse(userData));
     }
-  }, [router]);
+  }, [isClient, router, token, user]);
 
   const handleLogout = () => {
     localStorage.removeItem('token');
     localStorage.removeItem('user');
+    clearSession();
     router.push('/');
   };
 
-  if (!mounted || !user) {
+  if (!isClient || !user) {
     return (
       <div className="min-h-screen bg-brand-dark flex justify-center items-center">
         <span className="flex h-4 w-4 rounded-full bg-lifered-500 animate-pulse"></span>
       </div>
     );
   }
+
+  const identityIcon = user.identityType === 'ABHA' ? User : user.role === 'Hospital' ? Building2 : ShieldCheck;
+  const IdentityIcon = identityIcon;
 
   return (
     <div className="min-h-screen bg-brand-dark text-white flex flex-col">
@@ -47,11 +53,23 @@ export default function DashboardLayout({ children }) {
                 Life<span className="text-lifered-500">Link</span>
               </span>
             </Link>
-            
+
             <div className="flex items-center gap-4">
-              <div className="text-sm border-r border-white/20 pr-4 text-right">
+              <div className="text-sm border-r border-white/20 pr-4 text-right space-y-1">
                 <p className="font-medium text-white">{user.name}</p>
-                <p className="text-lifered-400 text-xs font-semibold">{user.role}</p>
+                <div className="flex items-center justify-end gap-2 flex-wrap">
+                  <p className="text-lifered-400 text-xs font-semibold">{user.role}</p>
+                  {user.verificationBadge && (
+                    <Badge variant={user.role === 'User' ? 'blue' : 'success'} className="hidden sm:inline-flex">
+                      <BadgeCheck className="h-3.5 w-3.5" />
+                      {user.verificationBadge}
+                    </Badge>
+                  )}
+                </div>
+                <p className="hidden sm:flex items-center justify-end gap-1 text-[11px] text-slate-400">
+                  <IdentityIcon className="h-3 w-3 text-[#ff8f1f]" />
+                  {user.abhaAddress || user.hfrFacilityId || user.dcgiLicenseNumber || user.identityType}
+                </p>
               </div>
               <button onClick={handleLogout} className="text-gray-400 hover:text-white transition-colors flex items-center gap-1 group">
                 <LogOut className="h-5 w-5 group-hover:text-lifered-500 transition-colors" />
@@ -61,18 +79,18 @@ export default function DashboardLayout({ children }) {
           </div>
         </div>
       </nav>
-      
+
       <main className="flex-1 w-full mx-auto relative relative">
-        {/* Background blobs for dashboard */}
         <div className="absolute top-0 left-1/2 -translate-x-1/2 w-full max-w-7xl h-full overflow-hidden z-0 pointer-events-none">
-          <div className="absolute top-[10%] right-[10%] w-[300px] h-[300px] bg-lifered-600/5 rounded-full blur-[100px]" />
-          <div className="absolute bottom-[20%] left-[5%] w-[400px] h-[400px] bg-lifered-400/5 rounded-full blur-[120px]" />
+          <div className="absolute top-[10%] right-[10%] w-[300px] h-[300px] bg-[#0b4ea2]/10 rounded-full blur-[100px]" />
+          <div className="absolute bottom-[20%] left-[5%] w-[400px] h-[400px] bg-[#ff8f1f]/8 rounded-full blur-[120px]" />
         </div>
-        
+
         <div className="relative z-10 max-w-7xl mx-auto p-4 sm:p-6 lg:p-8">
-           {children}
+          {children}
         </div>
       </main>
     </div>
   );
 }
+

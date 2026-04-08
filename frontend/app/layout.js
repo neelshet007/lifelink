@@ -1,4 +1,5 @@
 import './globals.css';
+import { DpiProvider } from '../components/providers/DpiProvider';
 
 export const metadata = {
   title: 'LifeLink | Smart Blood Matching',
@@ -9,7 +10,7 @@ export default function RootLayout({ children }) {
   return (
     <html lang="en">
       <body className="antialiased min-h-screen bg-brand-dark text-white selection:bg-lifered-500 selection:text-white flex flex-col">
-        {children}
+        <DpiProvider>{children}</DpiProvider>
       </body>
     </html>
   );

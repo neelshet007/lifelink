@@ -1,27 +1,20 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useSyncExternalStore } from 'react';
 import { ShieldAlert, Users, Activity, Droplet } from 'lucide-react';
 
-export default function AdminDashboard() {
-  const [user, setUser] = useState(null);
-  const [stats, setStats] = useState({
-    totalUsers: 0, totalRequests: 0, fulfilled: 0
-  });
+function subscribe() {
+  return () => {};
+}
 
-  useEffect(() => {
-    const userData = JSON.parse(localStorage.getItem('user'));
-    setUser(userData);
-    
-    // In a real app we would fetch real stats from admin endpoints.
-    // For this demo, let's just mock some numbers to show the UI since
-    // building an entire analytics engine was not the primary requirement
-    setStats({
-      totalUsers: 145,
-      totalRequests: 89,
-      fulfilled: 42
-    });
-  }, []);
+export default function AdminDashboard() {
+  const isClient = useSyncExternalStore(subscribe, () => true, () => false);
+  const user = isClient ? JSON.parse(localStorage.getItem('user') || 'null') : null;
+  const stats = {
+    totalUsers: 145,
+    totalRequests: 89,
+    fulfilled: 42
+  };
 
   if (!user || user.role !== 'Admin') return null;
 
@@ -29,7 +22,7 @@ export default function AdminDashboard() {
     <div className="space-y-6">
       <div className="flex justify-between items-center bg-brand-gray/40 border border-white/5 rounded-2xl p-6 shadow-xl relative overflow-hidden">
         <div className="absolute top-0 right-0 w-64 h-64 bg-lifered-500/5 rounded-full blur-[80px]" />
-        
+
         <div className="relative z-10">
           <h1 className="text-2xl font-bold text-white mb-1 flex items-center gap-2">
              System Admin Center

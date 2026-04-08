@@ -51,7 +51,28 @@ function calculateScore(distance, bloodCompatibility, isAvailable, lastDonationD
   return (0.4 * distanceScore) + (0.3 * compScore) + (0.2 * availabilityScore) + (0.1 * eligibilityScore);
 }
 
+function filterUsersByRegionAndBloodGroup(users, currentRegion, bloodGroup) {
+  return users.filter((user) => {
+    const sameRegion = user.currentRegion === currentRegion;
+    const compatibleBloodGroup = !bloodGroup || !user.bloodGroup || user.bloodGroup === bloodGroup || user.bloodGroup === 'O-';
+    return sameRegion && compatibleBloodGroup;
+  });
+}
+
+function filterUsersWithinRadius(users, latitude, longitude, radiusKm = 5) {
+  return users.filter((user) => {
+    const userLatitude = user?.location?.coordinates?.[1];
+    const userLongitude = user?.location?.coordinates?.[0];
+    if (typeof userLatitude !== 'number' || typeof userLongitude !== 'number') {
+      return false;
+    }
+    return getDistance(latitude, longitude, userLatitude, userLongitude) <= radiusKm;
+  });
+}
+
 module.exports = {
   getDistance,
-  calculateScore
+  calculateScore,
+  filterUsersByRegionAndBloodGroup,
+  filterUsersWithinRadius
 };

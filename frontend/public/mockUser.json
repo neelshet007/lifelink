@@ -1,0 +1,86 @@
+{
+  "resourceType": "Bundle",
+  "type": "collection",
+  "entry": [
+    {
+      "resource": {
+        "resourceType": "Patient",
+        "id": "abha-user-001",
+        "identifier": [
+          {
+            "system": "https://healthid.ndhm.gov.in",
+            "value": "user@abha"
+          }
+        ],
+        "name": [
+          {
+            "use": "official",
+            "family": "Rao",
+            "given": ["Ananya"]
+          }
+        ],
+        "gender": "female",
+        "telecom": [
+          {
+            "system": "phone",
+            "value": "+91 98765 43210"
+          }
+        ],
+        "extension": [
+          {
+            "url": "https://lifelink.app/fhir/StructureDefinition/blood-group",
+            "valueString": "O-"
+          },
+          {
+            "url": "https://lifelink.app/fhir/StructureDefinition/role",
+            "valueString": "User"
+          },
+          {
+            "url": "https://lifelink.app/fhir/StructureDefinition/age",
+            "valueInteger": 28
+          }
+        ]
+      }
+    },
+    {
+      "resource": {
+        "resourceType": "Patient",
+        "id": "abha-hospital-001",
+        "identifier": [
+          {
+            "system": "https://healthid.ndhm.gov.in",
+            "value": "hospital.command@abha"
+          }
+        ],
+        "name": [
+          {
+            "use": "official",
+            "family": "Command Center",
+            "given": ["Apex City Hospital"]
+          }
+        ],
+        "gender": "unknown",
+        "telecom": [
+          {
+            "system": "phone",
+            "value": "+91 90000 11000"
+          }
+        ],
+        "extension": [
+          {
+            "url": "https://lifelink.app/fhir/StructureDefinition/blood-group",
+            "valueString": "N/A"
+          },
+          {
+            "url": "https://lifelink.app/fhir/StructureDefinition/role",
+            "valueString": "Hospital"
+          },
+          {
+            "url": "https://lifelink.app/fhir/StructureDefinition/age",
+            "valueInteger": 1
+          }
+        ]
+      }
+    }
+  ]
+}

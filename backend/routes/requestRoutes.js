@@ -1,9 +1,9 @@
-const express = require('express');
+﻿const express = require('express');
 const router = express.Router();
 const { createRequest, getMyRequests, getIncomingRequests, updateRequestStatus, getRequestMatches, assignDonor } = require('../controllers/requestController');
 const { protect, authorize } = require('../middleware/authMiddleware');
 
-router.post('/', protect, authorize('User', 'Hospital'), createRequest);
+router.post('/', protect, authorize('User', 'Hospital', 'Blood Bank'), createRequest);
 router.get('/me', protect, getMyRequests);
 router.get('/incoming', protect, authorize('User', 'Hospital', 'Blood Bank'), getIncomingRequests);
 router.put('/:id/status', protect, updateRequestStatus);
