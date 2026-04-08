@@ -1,9 +1,9 @@
 'use client';
 
-import { useEffect, useMemo, useState, useSyncExternalStore } from 'react';
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import axios from 'axios';
 import { io } from 'socket.io-client';
-import { motion } from 'framer-motion';
+import { motion, AnimatePresence } from 'framer-motion';
 import {
   Activity,
   ArrowUpRight,
@@ -11,13 +11,16 @@ import {
   BellRing,
   BrainCircuit,
   Building2,
+  CheckCircle2,
   Download,
   Droplets,
   MapPinned,
+  Navigation,
   Search,
   ShieldCheck,
   Siren,
   Users,
+  X,
 } from 'lucide-react';
 import PredictiveDemandChart from '../../../components/PredictiveDemandChart';
 import { useDpi } from '../../../components/providers/DpiProvider';
@@ -29,25 +32,71 @@ function subscribe() {
   return () => {};
 }
 
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000';
+
+// ─── Donor Accepted Banner ────────────────────────────────────────────────────
+function DonorAcceptedBanner({ data, onDismiss }) {
+  return (
+    <motion.div
+      key="donor-accepted-banner"
+      initial={{ opacity: 0, y: -20, scale: 0.97 }}
+      animate={{ opacity: 1, y: 0, scale: 1 }}
+      exit={{ opacity: 0, y: -16, scale: 0.97 }}
+      transition={{ type: 'spring', stiffness: 320, damping: 26 }}
+      className="relative overflow-hidden rounded-[1.6rem] border-2 border-emerald-400/50 bg-[linear-gradient(135deg,rgba(16,185,129,0.22),rgba(5,150,105,0.10))] p-6 shadow-[0_8px_40px_rgba(16,185,129,0.22)] backdrop-blur-sm"
+    >
+      {/* Shimmer bar */}
+      <div className="absolute inset-x-0 top-0 h-0.5 bg-gradient-to-r from-emerald-400 via-teal-300 to-emerald-400 bg-[length:200%_100%] animate-[shimmer_2s_linear_infinite]" />
+
+      <div className="flex items-start justify-between gap-4">
+        <div className="flex items-start gap-4">
+          <div className="flex h-12 w-12 flex-shrink-0 items-center justify-center rounded-full bg-emerald-500/25 ring-2 ring-emerald-400/50">
+            <Navigation className="h-6 w-6 text-emerald-300 animate-pulse" />
+          </div>
+          <div>
+            <p className="text-xs font-bold uppercase tracking-[0.22em] text-emerald-300">✅ Emergency Accepted</p>
+            <h3 className="mt-1 text-xl font-semibold text-white">
+              Donor <span className="text-emerald-300">{data.donorName}</span> is on the way!
+            </h3>
+            <p className="mt-2 text-sm text-slate-200">
+              ETA: <span className="font-bold text-white">{data.etaMinutes} mins</span>
+              {data.bloodGroup && <> · Blood Group: <span className="font-bold text-emerald-300">{data.bloodGroup}</span></>}
+            </p>
+            {data.coordinates?.latitude ? (
+              <p className="mt-1 text-xs font-mono text-slate-400">
+                Live coords: {data.coordinates.latitude.toFixed(4)}, {data.coordinates.longitude.toFixed(4)}
+              </p>
+            ) : null}
+          </div>
+        </div>
+        <button
+          onClick={onDismiss}
+          className="flex-shrink-0 rounded-full p-1.5 text-emerald-300/70 hover:text-emerald-200 hover:bg-emerald-900/40 transition-colors"
+          aria-label="Dismiss banner"
+        >
+          <X className="h-4 w-4" />
+        </button>
+      </div>
+    </motion.div>
+  );
+}
+
+// ─── Main Hospital Dashboard ──────────────────────────────────────────────────
 export default function HospitalDashboard() {
   const { proofs, summonEvents, markSummonStarted, markSummonComplete } = useDpi();
   const isClient = useSyncExternalStore(subscribe, () => true, () => false);
+
   const gatewayUser = useMemo(() => {
-    if (!isClient) {
-      return null;
-    }
-    try {
-      return JSON.parse(localStorage.getItem('user') || 'null');
-    } catch {
-      return null;
-    }
+    if (!isClient) return null;
+    try { return JSON.parse(localStorage.getItem('user') || 'null'); } catch { return null; }
   }, [isClient]);
+
   const token = useMemo(() => {
-    if (!isClient) {
-      return null;
-    }
+    if (!isClient) return null;
     return localStorage.getItem('token');
   }, [isClient]);
+
+  const socketRef = useRef(null);
   const [activeSummon, setActiveSummon] = useState(null);
   const [liveFeed, setLiveFeed] = useState([]);
   const [requestDraft, setRequestDraft] = useState({ bloodGroup: 'O-', urgency: 'Critical' });
@@ -58,6 +107,10 @@ export default function HospitalDashboard() {
   const [lookupLoading, setLookupLoading] = useState(false);
   const [ledger, setLedger] = useState({ entries: [] });
   const [statusMessage, setStatusMessage] = useState('');
+  const [acceptedEmergency, setAcceptedEmergency] = useState(null);
+  const [showAcceptedBanner, setShowAcceptedBanner] = useState(false);
+  const [declineMessage, setDeclineMessage] = useState('');
+  const [etaDisplay, setEtaDisplay] = useState('');   // live countdown for accepted ETA
 
   const gatewayUserId = gatewayUser?._id || null;
   const latestProof = proofs[0];
@@ -82,31 +135,103 @@ export default function HospitalDashboard() {
     },
   ]), [gatewayUser, ledger.entries]);
 
+  // ── Socket connection with auto-reconnect ──────────────────────────────────
   useEffect(() => {
-    if (!gatewayUserId) {
-      return;
-    }
+    if (!gatewayUserId) return;
 
-    const socket = io('http://localhost:5000');
-    socket.emit('join', gatewayUserId);
-    socket.emit('join-role', 'facility-command');
-    socket.emit('join-region', gatewayUser.currentRegion || 'south-zone');
+    const socket = io(API_URL, {
+      reconnection: true,
+      reconnectionAttempts: Infinity,
+      reconnectionDelay: 1000,
+      reconnectionDelayMax: 5000,
+    });
+
+    const doJoin = () => {
+      socket.emit('join', gatewayUserId);
+      socket.emit('join-role', 'facility-command');
+      socket.emit('join-region', gatewayUser.currentRegion || 'south-zone');
+    };
+
+    doJoin();
+
+    // Re-join rooms after reconnect
+    socket.on('connect', () => {
+      console.log('[HospitalSocket] (Re)connected:', socket.id);
+      doJoin();
+    });
 
     socket.on('donor-live-location', (payload) => {
       setLiveFeed((prev) => [payload, ...prev].slice(0, 5));
     });
 
+    socket.on('DONOR_LIVE_LOCATION', (payload) => {
+      setLiveFeed((prev) => [payload, ...prev.filter((e) => e.requestId !== payload.requestId)].slice(0, 5));
+      setAcceptedEmergency((prev) => prev && prev.requestId === payload.requestId ? {
+        ...prev,
+        etaMinutes: payload.etaMinutes,
+        coordinates: payload.coordinates,
+        donorName: payload.donorName || prev.donorName,
+      } : prev);
+    });
+
+    socket.on('EMERGENCY_ACCEPTED', (payload) => {
+      setAcceptedEmergency(payload);
+      setShowAcceptedBanner(true);
+      setDeclineMessage('');
+      // Clear general status message so we don't duplicate
+      setStatusMessage('');
+    });
+
+    socket.on('EMERGENCY_DECLINED', (payload) => {
+      setDeclineMessage(`Donor ${payload.donorName} declined the active emergency.`);
+      // Auto-clear after 8 seconds
+      setTimeout(() => setDeclineMessage(''), 8000);
+    });
+
+    // A fulfilled request clears the accepted emergency panel
+    socket.on('request-completed', () => {
+      setTimeout(() => {
+        setAcceptedEmergency(null);
+        setShowAcceptedBanner(false);
+      }, 5000); // keep it visible for 5s so staff can see
+    });
+
+    socketRef.current = socket;
     return () => socket.disconnect();
   }, [gatewayUserId, gatewayUser?.currentRegion]);
 
+  // ── Live ETA countdown once a donor accepts ────────────────────────────────
   useEffect(() => {
-    if (!token || !gatewayUserId) {
-      return;
+    if (!acceptedEmergency?.etaMinutes) {
+      setEtaDisplay('');
+      return undefined;
     }
+    // Record the moment acceptance was received
+    const acceptedAt = Date.now();
+    const totalMs = acceptedEmergency.etaMinutes * 60 * 1000;
+
+    const tick = () => {
+      const remaining = totalMs - (Date.now() - acceptedAt);
+      if (remaining <= 0) {
+        setEtaDisplay('Arrived ✅');
+        return;
+      }
+      const mins = Math.floor(remaining / 60000);
+      const secs = String(Math.floor((remaining % 60000) / 1000)).padStart(2, '0');
+      setEtaDisplay(`${mins}:${secs}`);
+    };
+
+    tick(); // Render immediately
+    const intervalId = setInterval(tick, 1000);
+    return () => clearInterval(intervalId);
+  }, [acceptedEmergency?.etaMinutes]);
+
+  useEffect(() => {
+    if (!token || !gatewayUserId) return;
 
     const loadLedger = async () => {
       try {
-        const res = await axios.get('http://localhost:5000/api/hospital/ledger', {
+        const res = await axios.get(`${API_URL}/api/hospital/ledger`, {
           headers: { Authorization: `Bearer ${token}` },
         });
         setLedger(res.data || { entries: [] });
@@ -127,14 +252,12 @@ export default function HospitalDashboard() {
   };
 
   const handleCreateRequest = async () => {
-    if (!token) {
-      return;
-    }
-
+    if (!token) return;
     setRequesting(true);
     setStatusMessage('');
+    setDeclineMessage('');
     try {
-      const res = await axios.post('http://localhost:5000/api/requests', requestDraft, {
+      const res = await axios.post(`${API_URL}/api/requests`, requestDraft, {
         headers: { Authorization: `Bearer ${token}` },
       });
       setRequestResult(res.data);
@@ -147,16 +270,14 @@ export default function HospitalDashboard() {
   };
 
   const handleLookup = async () => {
-    if (!token) {
-      return;
-    }
-
+    if (!token) return;
     setLookupLoading(true);
     setStatusMessage('');
     try {
-      const res = await axios.get(`http://localhost:5000/api/hospital/sandbox-profile/${encodeURIComponent(lookupAbha.trim().toLowerCase())}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const res = await axios.get(
+        `${API_URL}/api/hospital/sandbox-profile/${encodeURIComponent(lookupAbha.trim().toLowerCase())}`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
       setLookupProfile(res.data);
     } catch (error) {
       setLookupProfile(null);
@@ -167,17 +288,14 @@ export default function HospitalDashboard() {
   };
 
   const handleLedgerIntake = async () => {
-    if (!token || !lookupProfile) {
-      return;
-    }
-
+    if (!token || !lookupProfile) return;
     setStatusMessage('');
     try {
-      const res = await axios.post('http://localhost:5000/api/hospital/ledger/intake', {
-        abhaAddress: lookupProfile.abhaAddress,
-      }, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const res = await axios.post(
+        `${API_URL}/api/hospital/ledger/intake`,
+        { abhaAddress: lookupProfile.abhaAddress },
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
       setLedger(res.data);
       setStatusMessage('Donor added to the facility private ledger.');
     } catch (error) {
@@ -186,12 +304,9 @@ export default function HospitalDashboard() {
   };
 
   const handleExportLedger = async () => {
-    if (!token) {
-      return;
-    }
-
+    if (!token) return;
     try {
-      const res = await axios.get('http://localhost:5000/api/hospital/ledger/export', {
+      const res = await axios.get(`${API_URL}/api/hospital/ledger/export`, {
         headers: { Authorization: `Bearer ${token}` },
         responseType: 'blob',
       });
@@ -212,6 +327,7 @@ export default function HospitalDashboard() {
 
   return (
     <div className="space-y-8">
+      {/* ── Hero Card ─────────────────────────────────────────────────────── */}
       <Card className="overflow-hidden border-[#0b4ea2]/25">
         <CardContent className="grid-shell relative grid gap-6 p-8 lg:grid-cols-[1.2fr_0.8fr]">
           <div className="absolute left-0 top-0 h-full w-full bg-[radial-gradient(circle_at_top_right,rgba(255,143,31,0.16),transparent_26%),radial-gradient(circle_at_bottom_left,rgba(11,78,162,0.18),transparent_34%)]" />
@@ -265,6 +381,32 @@ export default function HospitalDashboard() {
         </CardContent>
       </Card>
 
+      {/* ── Donor Accepted Banner (full width, prominent) ──────────────────── */}
+      <AnimatePresence>
+        {showAcceptedBanner && acceptedEmergency && (
+          <DonorAcceptedBanner
+            data={acceptedEmergency}
+            onDismiss={() => setShowAcceptedBanner(false)}
+          />
+        )}
+      </AnimatePresence>
+
+      {/* ── Decline notification ───────────────────────────────────────────── */}
+      <AnimatePresence>
+        {declineMessage && (
+          <motion.div
+            initial={{ opacity: 0, y: -10 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0 }}
+            className="flex items-center gap-3 rounded-[1.2rem] border border-amber-400/30 bg-amber-500/10 px-5 py-4 text-sm text-amber-100"
+          >
+            <Siren className="h-4 w-4 flex-shrink-0 text-amber-300" />
+            {declineMessage}
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* ── Charts row ─────────────────────────────────────────────────────── */}
       <div className="grid gap-6 xl:grid-cols-[1.15fr_0.85fr]">
         <Card>
           <CardHeader>
@@ -300,7 +442,6 @@ export default function HospitalDashboard() {
                   </div>
                   <ShieldCheck className="h-12 w-12 text-emerald-300" />
                 </div>
-
                 <div className="grid gap-3 sm:grid-cols-2">
                   <div className="rounded-2xl border border-white/10 bg-slate-950/25 p-4">
                     <p className="text-xs text-slate-400">Blood Group</p>
@@ -311,14 +452,12 @@ export default function HospitalDashboard() {
                     <p className="mt-2 text-sm font-semibold text-emerald-300">{latestProof.zkStatus}</p>
                   </div>
                 </div>
-
                 <div className="rounded-2xl border border-white/10 bg-slate-950/25 p-4">
                   <p className="text-xs text-slate-400">Proof Hash</p>
                   <p className="mt-2 break-all font-mono text-xs text-[#8bc0ff]">{latestProof.proofHash}</p>
                 </div>
-
-                <Button variant="success" size="lg" className="w-full" onClick={() => handleSummon(latestProof)} disabled={activeSummon === latestProof.id || latestProof.summonStatus === 'dispatched'}>
-                  {activeSummon === latestProof.id ? <><Activity className="h-4 w-4 animate-spin" /> Dispatching to facility ops...</> : latestProof.summonStatus === 'dispatched' ? <><BadgeCheck className="h-4 w-4" /> Verify & Summon Complete</> : <><BellRing className="h-4 w-4" /> Verify & Summon</>}
+                <Button variant="success" size="lg" className="w-full" onClick={() => handleSummon(latestProof)} disabled={activeSummon === latestProof.id || latestProof.summonStatus === 'dispatched'} id="btn-verify-summon">
+                  {activeSummon === latestProof.id ? <><Activity className="h-4 w-4 animate-spin" /> Dispatching to facility ops...</> : latestProof.summonStatus === 'dispatched' ? <><BadgeCheck className="h-4 w-4" /> Verify &amp; Summon Complete</> : <><BellRing className="h-4 w-4" /> Verify &amp; Summon</>}
                 </Button>
               </motion.div>
             ) : (
@@ -332,6 +471,7 @@ export default function HospitalDashboard() {
         </Card>
       </div>
 
+      {/* ── Broadcast + Live Tracking ──────────────────────────────────────── */}
       <div className="grid gap-6 lg:grid-cols-2">
         <Card>
           <CardHeader>
@@ -344,18 +484,18 @@ export default function HospitalDashboard() {
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="grid gap-4 sm:grid-cols-2">
-              <select value={requestDraft.bloodGroup} onChange={(e) => setRequestDraft((prev) => ({ ...prev, bloodGroup: e.target.value }))} className="rounded-[1rem] border border-white/10 bg-white/6 px-4 py-3 text-white outline-none">
+              <select value={requestDraft.bloodGroup} onChange={(e) => setRequestDraft((prev) => ({ ...prev, bloodGroup: e.target.value }))} className="rounded-[1rem] border border-white/10 bg-white/6 px-4 py-3 text-white outline-none" id="select-blood-group-broadcast">
                 {['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-'].map((group) => (
                   <option key={group} value={group} className="bg-slate-900">{group}</option>
                 ))}
               </select>
-              <select value={requestDraft.urgency} onChange={(e) => setRequestDraft((prev) => ({ ...prev, urgency: e.target.value }))} className="rounded-[1rem] border border-white/10 bg-white/6 px-4 py-3 text-white outline-none">
+              <select value={requestDraft.urgency} onChange={(e) => setRequestDraft((prev) => ({ ...prev, urgency: e.target.value }))} className="rounded-[1rem] border border-white/10 bg-white/6 px-4 py-3 text-white outline-none" id="select-urgency-broadcast">
                 {['Critical', 'High', 'Medium'].map((urgency) => (
                   <option key={urgency} value={urgency} className="bg-slate-900">{urgency}</option>
                 ))}
               </select>
             </div>
-            <Button onClick={handleCreateRequest} className="w-full" disabled={requesting}>
+            <Button onClick={handleCreateRequest} className="w-full" disabled={requesting} id="btn-broadcast-alert">
               {requesting ? <><Activity className="h-4 w-4 animate-spin" /> Broadcasting...</> : <><Siren className="h-4 w-4" /> Broadcast Regional Red Alert</>}
             </Button>
             {requestResult && (
@@ -384,9 +524,9 @@ export default function HospitalDashboard() {
           <CardContent className="space-y-4">
             {liveFeed.length > 0 ? liveFeed.map((item, index) => (
               <div key={`${item.donorAlias}-${index}`} className="rounded-[1.4rem] border border-white/10 bg-white/5 p-4">
-                <p className="text-sm font-semibold text-white">{item.donorAlias} • {item.abhaStatus}</p>
+                <p className="text-sm font-semibold text-white">{item.donorAlias} · {item.abhaStatus}</p>
                 <p className="mt-2 text-sm text-slate-300">{item.requestTitle}</p>
-                <p className="mt-2 text-xs text-slate-400">ETA {item.etaMinutes} min • {item.coordinates.latitude}, {item.coordinates.longitude}</p>
+                <p className="mt-2 text-xs text-slate-400">ETA {item.etaMinutes} min · {item.coordinates?.latitude}, {item.coordinates?.longitude}</p>
               </div>
             )) : (
               <div className="rounded-[1.4rem] border border-dashed border-white/12 bg-white/4 p-6 text-sm text-slate-400">No live donor coordinates yet. Accept a request from the citizen dashboard to stream the feed here.</div>
@@ -395,6 +535,62 @@ export default function HospitalDashboard() {
         </Card>
       </div>
 
+      {/* ── Accepted Emergency: Donor Details + Live Map ───────────────────── */}
+      <AnimatePresence>
+        {acceptedEmergency && (
+          <motion.div
+            initial={{ opacity: 0, y: 16 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 12 }}
+            className="grid gap-6 lg:grid-cols-[0.9fr_1.1fr]"
+          >
+            <Card>
+              <CardHeader>
+                <Badge variant="success">
+                  <CheckCircle2 className="h-3.5 w-3.5" />
+                  Emergency Accepted
+                </Badge>
+                <CardTitle>Donor {acceptedEmergency.donorName} is on the way</CardTitle>
+                <CardDescription>ETA: <span className="font-bold text-emerald-300">{etaDisplay || `${acceptedEmergency.etaMinutes} mins`}</span> · Blood Group: {acceptedEmergency.bloodGroup}</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-3 text-sm text-slate-200">
+                <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+                  <p className="text-xs uppercase tracking-[0.18em] text-slate-400">Live Coordinates</p>
+                  <p className="mt-2 font-mono">{acceptedEmergency.coordinates?.latitude?.toFixed(5) ?? '—'}, {acceptedEmergency.coordinates?.longitude?.toFixed(5) ?? '—'}</p>
+                </div>
+                <div className="rounded-2xl border border-emerald-400/25 bg-emerald-500/10 p-4">
+                  <p className="text-xs uppercase tracking-[0.18em] text-emerald-300/80">Status</p>
+                  <p className="mt-2 font-semibold text-white">Donor {acceptedEmergency.donorName} accepted the emergency request and is being tracked live.</p>
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <Badge variant="blue">
+                  <MapPinned className="h-3.5 w-3.5" />
+                  Live Map
+                </Badge>
+                <CardTitle>Moving donor marker</CardTitle>
+                <CardDescription>Live donor movement rendered into a Google Maps embed. Updates on every socket coordinate push.</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="overflow-hidden rounded-[1.5rem] border border-white/10 bg-slate-950/25">
+                  <iframe
+                    key={`map-${acceptedEmergency.coordinates?.latitude}-${acceptedEmergency.coordinates?.longitude}`}
+                    title="Donor live map"
+                    src={`https://maps.google.com/maps?q=${acceptedEmergency.coordinates?.latitude || 0},${acceptedEmergency.coordinates?.longitude || 0}&z=15&output=embed`}
+                    className="h-[320px] w-full"
+                    loading="lazy"
+                  />
+                </div>
+              </CardContent>
+            </Card>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* ── CRM + Dispatch ─────────────────────────────────────────────────── */}
       <div className="grid gap-6 lg:grid-cols-[0.95fr_1.05fr]">
         <Card>
           <CardHeader>
@@ -407,8 +603,8 @@ export default function HospitalDashboard() {
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="flex gap-3">
-              <input value={lookupAbha} onChange={(e) => setLookupAbha(e.target.value)} placeholder="Enter ABHA ID" className="flex-1 rounded-[1rem] border border-white/10 bg-white/6 px-4 py-3 text-white placeholder:text-slate-400 outline-none" />
-              <Button onClick={handleLookup} disabled={lookupLoading}>
+              <input value={lookupAbha} onChange={(e) => setLookupAbha(e.target.value)} placeholder="Enter ABHA ID" className="flex-1 rounded-[1rem] border border-white/10 bg-white/6 px-4 py-3 text-white placeholder:text-slate-400 outline-none" id="input-abha-lookup" />
+              <Button onClick={handleLookup} disabled={lookupLoading} id="btn-abha-lookup">
                 {lookupLoading ? <Activity className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
                 Lookup
               </Button>
@@ -416,10 +612,10 @@ export default function HospitalDashboard() {
 
             {lookupProfile && (
               <div className="rounded-[1.4rem] border border-white/10 bg-white/5 p-4">
-                <p className="text-sm font-semibold text-white">{lookupProfile.name} • {lookupProfile.abhaAddress}</p>
-                <p className="mt-2 text-sm text-slate-300">{lookupProfile.bloodGroup || 'Blood group pending'} • {lookupProfile.verificationTier}</p>
-                <p className="mt-2 text-xs text-slate-400">Verification source: {lookupProfile.verificationSourceId || 'Not supplied'} • Region: {lookupProfile.currentRegion}</p>
-                <Button onClick={handleLedgerIntake} className="mt-4 w-full">
+                <p className="text-sm font-semibold text-white">{lookupProfile.name} · {lookupProfile.abhaAddress}</p>
+                <p className="mt-2 text-sm text-slate-300">{lookupProfile.bloodGroup || 'Blood group pending'} · {lookupProfile.verificationTier}</p>
+                <p className="mt-2 text-xs text-slate-400">Verification source: {lookupProfile.verificationSourceId || 'Not supplied'} · Region: {lookupProfile.currentRegion}</p>
+                <Button onClick={handleLedgerIntake} className="mt-4 w-full" id="btn-add-to-ledger">
                   <Droplets className="h-4 w-4" />
                   Add to Facility Ledger
                 </Button>
@@ -432,7 +628,7 @@ export default function HospitalDashboard() {
                   <p className="text-sm font-semibold text-white">Private Ledger</p>
                   <p className="mt-1 text-xs text-slate-400">{ledger.entries?.length || 0} donors added during this drive.</p>
                 </div>
-                <Button variant="secondary" onClick={handleExportLedger} className="bg-white/10 text-white hover:bg-white/15">
+                <Button variant="secondary" onClick={handleExportLedger} className="bg-white/10 text-white hover:bg-white/15" id="btn-export-ledger">
                   <Download className="h-4 w-4" />
                   Export
                 </Button>
@@ -441,7 +637,7 @@ export default function HospitalDashboard() {
                 {(ledger.entries?.length || 0) > 0 ? ledger.entries.slice(0, 5).map((entry) => (
                   <div key={entry._id || entry.abhaAddress} className="rounded-[1rem] border border-white/10 bg-slate-950/25 p-3">
                     <p className="text-sm font-semibold text-white">{entry.donorName}</p>
-                    <p className="mt-1 text-xs text-slate-300">{entry.abhaAddress} • {entry.bloodGroup || 'Pending group'}</p>
+                    <p className="mt-1 text-xs text-slate-300">{entry.abhaAddress} · {entry.bloodGroup || 'Pending group'}</p>
                     <p className="mt-1 text-xs text-slate-400">{entry.verificationTier}</p>
                   </div>
                 )) : (

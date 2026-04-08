@@ -1,7 +1,9 @@
-﻿const Request = require('../models/Request');
+const Request = require('../models/Request');
 const User = require('../models/User');
 const mongoose = require('mongoose');
 const { getDistance, calculateScore, filterUsersWithinRadius } = require('../utils/matchingAlgorithm');
+
+const EMERGENCY_EXPIRY_MS = 15 * 60 * 1000; // 15 minutes
 
 const getCompatibility = (donorBloodGroup, requestedBloodGroup) => {
   if (!donorBloodGroup) return 'Not compatible';
@@ -41,6 +43,8 @@ const createRequest = async (req, res) => {
       },
     });
 
+    const expiresAt = new Date(request.createdAt.getTime() + EMERGENCY_EXPIRY_MS).toISOString();
+
     const io = req.app.get('io');
     const allUsersInRegion = await User.find({ _id: { $ne: req.user._id }, currentRegion, role: 'User' });
     const nearbyUsers = filterUsersWithinRadius(allUsersInRegion, lat, lng, 5);
@@ -48,24 +52,38 @@ const createRequest = async (req, res) => {
 
     for (const user of nearbyUsers) {
       const distance = getDistance(lat, lng, user.location.coordinates[1], user.location.coordinates[0]);
-      let shouldNotify = false;
       const compatibility = getCompatibility(user.bloodGroup, bloodGroup);
       const available = user.isAvailable !== false;
       const eligible = checkEligibility(user.lastDonationDate) && user.is_eligible !== false;
-      shouldNotify = compatibility !== 'Not compatible' && available && eligible;
+      const shouldNotify = compatibility !== 'Not compatible' && available && eligible;
 
       if (shouldNotify) {
         const lastDonationDaysAgo = user.lastDonationDate
           ? Math.floor((new Date() - new Date(user.lastDonationDate)) / (1000 * 60 * 60 * 24))
           : null;
         const score = calculateScore(distance, compatibility, user.isAvailable !== false, lastDonationDaysAgo);
-        scoredMatches.push({ user: { _id: user._id, name: user.name, role: user.role, distance: distance.toFixed(2), email: user.email }, score, distance });
+        scoredMatches.push({
+          user: {
+            _id: user._id,
+            name: user.name,
+            role: user.role,
+            distance: distance.toFixed(2),
+            email: user.email,
+          },
+          score,
+          distance,
+        });
       }
     }
 
     scoredMatches.sort((a, b) => b.score - a.score);
 
-    if (io && typeof io.getNearbyEligibleRecipients === 'function' && (req.user.role === 'Hospital' || req.user.role === 'Blood Bank')) {
+    // ─── Real-time emergency broadcast via Socket.io ─────────────────────────
+    const notifiedSocketIds = [];
+
+    if (io && typeof io.getNearbyEligibleRecipients === 'function' &&
+        (req.user.role === 'Hospital' || req.user.role === 'Blood Bank')) {
+
       const connectedRecipients = io.getNearbyEligibleRecipients({
         latitude: lat,
         longitude: lng,
@@ -74,20 +92,47 @@ const createRequest = async (req, res) => {
         excludeUserId: req.user._id,
       });
 
+      console.log(
+        `[Request] ${new Date().toISOString()} Broadcasting INCOMING_EMERGENCY to ${connectedRecipients.length} connected donor(s) for request ${request._id}.`
+      );
+
       connectedRecipients.forEach((recipient) => {
-        io.to(recipient.socketId).emit('EMERGENCY_ALERT', {
+        io.to(recipient.socketId).emit('INCOMING_EMERGENCY', {
           requestId: request._id,
           message: `Emergency: ${bloodGroup} needed ${recipient.distance.toFixed(1)}km away`,
           bloodGroup,
           urgency: urgency || 'Medium',
           currentRegion,
           hospital: requester?.name || req.user.name,
+          hospitalId: requester?._id || req.user._id,
           requesterRole: req.user.role,
           distance: recipient.distance.toFixed(1),
           hospitalCoords: { latitude: lat, longitude: lng },
           createdAt: request.createdAt,
+          expiresAt,
         });
+        notifiedSocketIds.push(recipient.socketId);
       });
+
+      // Register notified sockets so we can send expiry events later
+      if (typeof io.trackNotifiedSockets === 'function') {
+        io.trackNotifiedSockets(request._id, notifiedSocketIds);
+      }
+
+      // Schedule automatic expiry broadcast after 15 minutes
+      setTimeout(() => {
+        if (typeof io.emitRequestExpired === 'function') {
+          io.emitRequestExpired(request._id, expiresAt);
+        }
+
+        // Also update the request status to Expired if still Pending
+        Request.findOneAndUpdate(
+          { _id: request._id, status: 'Pending' },
+          { $set: { status: 'Expired' } }
+        ).catch((err) => console.error('[Request] Failed to mark request as Expired:', err));
+
+        console.log(`[Request] ${new Date().toISOString()} Request ${request._id} expired — notified ${notifiedSocketIds.length} donor(s).`);
+      }, EMERGENCY_EXPIRY_MS);
     }
 
     res.status(201).json({ request, matches: scoredMatches });
@@ -108,7 +153,10 @@ const getMyRequests = async (req, res) => {
 
 const getIncomingRequests = async (req, res) => {
   try {
-    const requests = await Request.find({ currentRegion: req.user.currentRegion }).populate('requester', 'name email location currentRegion').sort({ createdAt: -1 });
+    const requests = await Request
+      .find({ currentRegion: req.user.currentRegion })
+      .populate('requester', 'name email location currentRegion')
+      .sort({ createdAt: -1 });
     res.json(requests);
   } catch (error) {
     res.status(500).json({ message: 'Server error' });
@@ -126,7 +174,7 @@ const updateRequestStatus = async (req, res) => {
         { _id: req.params.id, status: 'Pending' },
         {
           $set: { status: 'Accepted', handledBy: (req.user.role === 'Hospital' || req.user.role === 'Blood Bank') ? userId : undefined },
-          $addToSet: { acceptedBy: userId }
+          $addToSet: { acceptedBy: userId },
         },
         { new: true }
       );
@@ -141,7 +189,7 @@ const updateRequestStatus = async (req, res) => {
       if (io) {
         io.to(updated.requester.toString()).emit('request-accepted', {
           requestId: updated._id,
-          message: `Your request has been accepted by ${userName}`
+          message: `Your request has been accepted by ${userName}`,
         });
         io.emit('request-updated', { requestId: updated._id, status: 'Accepted' });
       }
@@ -177,7 +225,17 @@ const getRequestMatches = async (req, res) => {
           ? Math.floor((new Date() - new Date(donor.lastDonationDate)) / (1000 * 60 * 60 * 24))
           : null;
         const score = calculateScore(0, compat, true, lastDonationDaysAgo);
-        return { _id: donor._id, name: donor.name, age: donor.age, type: 'Internal', bloodGroup: donor.bloodGroup, contact: donor.contact, barcodeId: donor.barcodeId, donationHistory: donor.donationHistory, score };
+        return {
+          _id: donor._id,
+          name: donor.name,
+          age: donor.age,
+          type: 'Internal',
+          bloodGroup: donor.bloodGroup,
+          contact: donor.contact,
+          barcodeId: donor.barcodeId,
+          donationHistory: donor.donationHistory,
+          score,
+        };
       });
 
     const allUsers = await User.find({ role: 'User', _id: { $ne: request.requester }, currentRegion: request.currentRegion });
@@ -187,7 +245,12 @@ const getRequestMatches = async (req, res) => {
         return compat !== 'Not compatible' && user.isAvailable !== false && checkEligibility(user.lastDonationDate) && user.is_eligible !== false;
       })
       .map((user) => {
-        const distance = getDistance(request.location.coordinates[1], request.location.coordinates[0], user.location.coordinates[1], user.location.coordinates[0]);
+        const distance = getDistance(
+          request.location.coordinates[1],
+          request.location.coordinates[0],
+          user.location.coordinates[1],
+          user.location.coordinates[0]
+        );
         const compat = getCompatibility(user.bloodGroup, request.bloodGroup);
         const lastDonationDaysAgo = user.lastDonationDate
           ? Math.floor((new Date() - new Date(user.lastDonationDate)) / (1000 * 60 * 60 * 24))
@@ -211,7 +274,9 @@ const assignDonor = async (req, res) => {
     let targetDonorType = null;
 
     if (hospital && hospital.internalDonorDatabase) {
-      targetDonor = hospital.internalDonorDatabase.find((d) => (d.barcodeId && d.barcodeId === assignedDonorId) || (d.contact && d.contact === phoneNumber));
+      targetDonor = hospital.internalDonorDatabase.find(
+        (d) => (d.barcodeId && d.barcodeId === assignedDonorId) || (d.contact && d.contact === phoneNumber)
+      );
       if (targetDonor) targetDonorType = 'Internal';
     }
 
@@ -223,7 +288,9 @@ const assignDonor = async (req, res) => {
 
     if (!targetDonor) return res.status(404).json({ message: 'User Not Found.' });
     if (targetDonor.is_eligible === false || !checkEligibility(targetDonor.lastDonationDate)) {
-      const cdDate = targetDonor.lastDonationDate ? new Date(new Date(targetDonor.lastDonationDate).getTime() + 90 * 24 * 60 * 60 * 1000).toLocaleDateString() : 'unknown';
+      const cdDate = targetDonor.lastDonationDate
+        ? new Date(new Date(targetDonor.lastDonationDate).getTime() + 90 * 24 * 60 * 60 * 1000).toLocaleDateString()
+        : 'unknown';
       return res.status(403).json({ message: `User found but ineligible: 90-day cooldown active until ${cdDate}.` });
     }
 
@@ -251,10 +318,21 @@ const assignDonor = async (req, res) => {
 
     const io = req.app.get('io');
     if (io) {
+      // Notify the requester (hospital side listener)
       io.to(request.requester.toString()).emit('request-completed', {
         requestId: request._id,
-        message: `Your blood request has been fulfilled by ${req.user.name}`
+        message: `Your blood request has been fulfilled by ${req.user.name}`,
       });
+
+      // Notify the donor that the request is fulfilled so their Emergency Tab clears
+      const donorId = targetDonorType === 'Platform' ? targetDonor._id.toString() : null;
+      if (donorId) {
+        io.to(donorId).emit('REQUEST_FULFILLED', {
+          requestId: request._id,
+          message: 'Thank you! The hospital has marked the request as fulfilled.',
+        });
+      }
+
       io.emit('request-updated', { requestId: request._id, status: 'Fulfilled' });
     }
 

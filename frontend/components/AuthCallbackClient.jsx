@@ -1,4 +1,4 @@
-﻿'use client';
+'use client';
 
 import { useEffect, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
@@ -12,6 +12,8 @@ function decodeMockToken(token) {
     return null;
   }
 }
+
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000';
 
 export default function AuthCallbackClient() {
   const router = useRouter();
@@ -30,7 +32,7 @@ export default function AuthCallbackClient() {
         }
 
         localStorage.removeItem('mock-abdm-transfer');
-        const sessionRes = await axios.post('http://localhost:5000/api/auth/gateway-login/complete', {
+        const sessionRes = await axios.post(`${API_URL}/api/auth/gateway-login/complete`, {
           identityType: decoded.identityType,
           identifier: decoded.identifier,
           declarationAccepted: true,

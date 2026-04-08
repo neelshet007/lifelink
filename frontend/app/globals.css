@@ -115,3 +115,13 @@ body {
   0%, 100% { opacity: 0.35; transform: translateY(0); }
   50% { opacity: 1; transform: translateY(-6px); }
 }
+
+@keyframes shimmer {
+  0% { background-position: 200% center; }
+  100% { background-position: -200% center; }
+}
+
+@keyframes emergency-ring-pulse {
+  0%, 100% { opacity: 0.18; transform: scale(1); }
+  50% { opacity: 0.38; transform: scale(1.005); }
+}

@@ -1,4 +1,4 @@
-﻿'use client';
+'use client';
 
 import { useEffect, useMemo, useState } from 'react';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
@@ -46,6 +46,8 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 function getRolePath(role) {
   return role.toLowerCase().replace(/\s+/g, '-');
 }
+
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000';
 
 export default function AuthForm() {
   const router = useRouter();
@@ -128,7 +130,8 @@ export default function AuthForm() {
       return;
     }
 
-    const completeRes = await axios.post('http://localhost:5000/api/auth/gateway-login/complete', {
+
+    const completeRes = await axios.post(`${API_URL}/api/auth/gateway-login/complete`, {
       identityType: activeTab,
       identifier,
       declarationAccepted,

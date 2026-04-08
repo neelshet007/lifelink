@@ -1,10 +1,12 @@
-﻿'use client';
+'use client';
 
 import { useEffect, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import axios from 'axios';
 import { motion } from 'framer-motion';
 import { Activity, ArrowRight, Building2, ShieldCheck } from 'lucide-react';
+
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000';
 
 export default function MockGovernmentGatewayClient() {
   const router = useRouter();
@@ -19,7 +21,7 @@ export default function MockGovernmentGatewayClient() {
         const identifier = searchParams.get('identifier');
         const returnTo = searchParams.get('returnTo') || '/login';
         await new Promise((resolve) => setTimeout(resolve, 2000));
-        const res = await axios.post('http://localhost:5000/api/auth/gateway-login/complete', {
+        const res = await axios.post(`${API_URL}/api/auth/gateway-login/complete`, {
           identityType,
           identifier,
           declarationAccepted: true,
