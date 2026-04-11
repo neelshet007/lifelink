@@ -2,26 +2,28 @@
 
 import { useMemo, useState, useSyncExternalStore } from 'react';
 import axios from 'axios';
-import { Activity, CheckCircle2, MapPin, Siren, XCircle } from 'lucide-react';
+import { Activity, MapPin, Navigation, Siren } from 'lucide-react';
 import { Badge } from '../../../components/ui/badge';
 import { Button } from '../../../components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../../../components/ui/card';
-import { activeEmergencyStoreSubscribe, getActiveEmergencyState, setActiveEmergency, setEmergencyDrawerOpen } from '../../../lib/activeEmergencyStore';
-import { getRealtimeSocket } from '../../../lib/realtime';
 import { API_URL, getStoredUser, getToken } from '../../../lib/session';
+import { getSocketStoreState, socketStoreSubscribe } from '../../../lib/socketStore';
 
 function subscribe(callback) {
-  return activeEmergencyStoreSubscribe(callback);
+  return socketStoreSubscribe(callback);
 }
 
 export default function UserDashboard() {
-  const { activeEmergency, emergencyDrawerOpen } = useSyncExternalStore(subscribe, getActiveEmergencyState, getActiveEmergencyState);
+  const { activeEmergency, navigationMode, connectionStatus } = useSyncExternalStore(
+    subscribe,
+    getSocketStoreState,
+    getSocketStoreState
+  );
   const user = useMemo(() => getStoredUser(), []);
   const token = useMemo(() => getToken(), []);
   const [requestDraft, setRequestDraft] = useState({ bloodGroup: user?.bloodGroup || 'O+', urgency: 'Critical' });
   const [requestStatus, setRequestStatus] = useState('');
   const [submitting, setSubmitting] = useState(false);
-  const [actioning, setActioning] = useState(false);
 
   const handleCreateRequest = async () => {
     if (!token) return;
@@ -39,23 +41,6 @@ export default function UserDashboard() {
     }
   };
 
-  const handleEmergencyAction = async (type) => {
-    if (!activeEmergency) return;
-    setActioning(true);
-    try {
-      const socket = getRealtimeSocket();
-      socket.emit(type === 'accept' ? 'accept_request' : 'decline_request', { requestId: activeEmergency.requestId });
-      if (type === 'decline') {
-        setActiveEmergency(null);
-      }
-      if (type === 'accept') {
-        setEmergencyDrawerOpen(true);
-      }
-    } finally {
-      setActioning(false);
-    }
-  };
-
   return (
     <div className="space-y-6">
       <Card>
@@ -63,10 +48,10 @@ export default function UserDashboard() {
           <Badge variant="blue">Live Pulse</Badge>
           <CardTitle>Point-to-point donor console</CardTitle>
           <CardDescription>
-            Your emergency feed is now driven by real-time coordinates, verified blood group data, and a strict 5 km radius.
+            Your emergency feed is driven by realtime sockets, verified blood group data, and a strict 5 km radius.
           </CardDescription>
         </CardHeader>
-        <CardContent className="grid gap-4 md:grid-cols-3">
+        <CardContent className="grid gap-4 md:grid-cols-4">
           <div className="rounded-[1.25rem] border border-white/10 bg-white/5 p-4">
             <p className="text-xs uppercase tracking-[0.2em] text-slate-400">ABHA</p>
             <p className="mt-2 text-sm font-semibold text-white">{user?.abhaAddress || 'Not linked'}</p>
@@ -76,38 +61,43 @@ export default function UserDashboard() {
             <p className="mt-2 text-sm font-semibold text-white">{user?.bloodGroup || 'Pending verification'}</p>
           </div>
           <div className="rounded-[1.25rem] border border-white/10 bg-white/5 p-4">
+            <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Socket Status</p>
+            <p className="mt-2 text-sm font-semibold text-white">{connectionStatus === 'online' ? 'System Online' : connectionStatus === 'connecting' ? 'Connecting' : 'System Offline'}</p>
+          </div>
+          <div className="rounded-[1.25rem] border border-white/10 bg-white/5 p-4">
             <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Realtime Radius</p>
             <p className="mt-2 text-sm font-semibold text-white">5 km emergency scan</p>
           </div>
         </CardContent>
       </Card>
 
-      {activeEmergency && emergencyDrawerOpen && (
-        <Card className="border-red-400/30 bg-[linear-gradient(180deg,rgba(127,29,29,0.35),rgba(15,23,42,0.95))]">
+      {activeEmergency && (
+        <Card className={navigationMode ? 'border-emerald-400/30 bg-[linear-gradient(180deg,rgba(5,150,105,0.22),rgba(15,23,42,0.95))]' : 'border-red-400/30 bg-[linear-gradient(180deg,rgba(127,29,29,0.35),rgba(15,23,42,0.95))]'}>
           <CardHeader>
-            <Badge variant="saffron"><Siren className="h-3.5 w-3.5" />Incoming Emergency</Badge>
+            <Badge variant={navigationMode ? 'success' : 'saffron'}>
+              {navigationMode ? <Navigation className="h-3.5 w-3.5" /> : <Siren className="h-3.5 w-3.5" />}
+              {navigationMode ? 'Navigation Mode' : 'Emergency Hot'}
+            </Badge>
             <CardTitle>{activeEmergency.hospital} needs {activeEmergency.bloodGroup}</CardTitle>
             <CardDescription>
-              Immediate red alert opened automatically. Distance: {activeEmergency.distance} km. Urgency: {activeEmergency.urgency}.
+              {navigationMode
+                ? 'You accepted this request. Your live location stream is active for the hospital dashboard.'
+                : `Emergency tab is pinned. Distance: ${activeEmergency.distanceKm ?? activeEmergency.distance} km. Urgency: ${activeEmergency.urgency}.`}
             </CardDescription>
           </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="rounded-[1.25rem] border border-red-400/20 bg-red-500/10 p-4 text-sm text-red-50">
-              {activeEmergency.message}
+          <CardContent className="grid gap-4 md:grid-cols-3">
+            <div className="rounded-[1rem] border border-white/10 bg-white/5 p-4 text-sm text-slate-200">
+              <p className="text-xs uppercase tracking-[0.18em] text-slate-400">Facility</p>
+              <p className="mt-2 font-semibold text-white">{activeEmergency.hospital}</p>
             </div>
-            <div className="grid gap-3 md:grid-cols-2">
-              <Button variant="success" size="lg" onClick={() => handleEmergencyAction('accept')} disabled={actioning}>
-                <CheckCircle2 className="h-4 w-4" />
-                Accept Emergency
-              </Button>
-              <Button variant="secondary" size="lg" onClick={() => handleEmergencyAction('decline')} disabled={actioning}>
-                <XCircle className="h-4 w-4" />
-                Decline
-              </Button>
+            <div className="rounded-[1rem] border border-white/10 bg-white/5 p-4 text-sm text-slate-200">
+              <p className="text-xs uppercase tracking-[0.18em] text-slate-400">Type</p>
+              <p className="mt-2 font-semibold text-white">{activeEmergency.hospitalType || activeEmergency.requesterRole}</p>
             </div>
-            <button type="button" className="text-sm text-slate-300 underline" onClick={() => setEmergencyDrawerOpen(false)}>
-              Hide panel for now
-            </button>
+            <div className="rounded-[1rem] border border-white/10 bg-white/5 p-4 text-sm text-slate-200">
+              <p className="text-xs uppercase tracking-[0.18em] text-slate-400">Distance Snapshot</p>
+              <p className="mt-2 inline-flex items-center gap-2 font-semibold text-white"><MapPin className="h-4 w-4 text-[#8bc0ff]" /> {activeEmergency.distanceKm ?? activeEmergency.distance ?? '--'} km</p>
+            </div>
           </CardContent>
         </Card>
       )}
@@ -142,7 +132,7 @@ export default function UserDashboard() {
           <CardTitle>What changed</CardTitle>
         </CardHeader>
         <CardContent className="grid gap-3 text-sm text-slate-300 md:grid-cols-3">
-          <div className="rounded-[1rem] border border-white/10 bg-white/5 p-4">Legacy area buckets are no longer used for matching.</div>
+          <div className="rounded-[1rem] border border-white/10 bg-white/5 p-4">Incoming emergency events are now handled globally, so the action tab appears without refreshing the page.</div>
           <div className="rounded-[1rem] border border-white/10 bg-white/5 p-4">Your live coordinates are synced on login and refreshed while the dashboard stays open.</div>
           <div className="rounded-[1rem] border border-white/10 bg-white/5 p-4 inline-flex items-start gap-2"><MapPin className="mt-0.5 h-4 w-4 text-[#8bc0ff]" /> Only matching donors within 5 km are notified.</div>
         </CardContent>

@@ -70,6 +70,106 @@ module.exports = function setupSocket(server) {
     return session;
   }
 
+  async function emitDonorAccepted(socket, payload = {}) {
+    const session = activeSessions.get(socket.id);
+    const donorId = payload?.donorId || session?.userId;
+    if (!payload?.requestId || !donorId || !session) return;
+
+    const request = await Request.findOneAndUpdate(
+      { _id: payload.requestId, status: 'Pending' },
+      {
+        $set: { status: 'Accepted' },
+        $addToSet: { acceptedBy: donorId },
+      },
+      { new: true }
+    ).populate('requester', 'name');
+
+    if (!request) return;
+
+    const donor = await User.findById(donorId).select('name bloodGroup');
+    if (!donor) return;
+
+    const hospitalCoords = request.location?.coordinates || [0, 0];
+    const donorLat = Number(session.latitude) || 0;
+    const donorLng = Number(session.longitude) || 0;
+    const distanceKm = getDistance(hospitalCoords[1] || 0, hospitalCoords[0] || 0, donorLat, donorLng);
+    const etaMinutes = Math.max(3, Math.round(distanceKm * 4));
+
+    const eventPayload = {
+      requestId: request._id,
+      donorId: donor._id,
+      donorName: donor.name,
+      bloodGroup: session.bloodGroup || donor.bloodGroup,
+      etaMinutes,
+      distanceKm: Number(distanceKm.toFixed(2)),
+      coordinates: {
+        latitude: donorLat,
+        longitude: donorLng,
+      },
+      status: 'In Progress',
+    };
+
+    io.to(request.requester._id.toString()).emit('DONOR_ACCEPTED', eventPayload);
+    io.to(request.requester._id.toString()).emit('EMERGENCY_ACCEPTED', eventPayload);
+  }
+
+  async function emitDonorDeclined(socket, payload = {}) {
+    const request = await Request.findById(payload?.requestId);
+    if (!request) return;
+
+    const session = activeSessions.get(socket.id);
+    const eventPayload = {
+      requestId: request._id,
+      donorId: payload?.donorId || session?.userId || null,
+      donorName: session?.name || 'Unknown donor',
+    };
+
+    io.to(request.requester.toString()).emit('DONOR_DECLINED', eventPayload);
+    io.to(request.requester.toString()).emit('EMERGENCY_DECLINED', eventPayload);
+  }
+
+  async function emitLocationUpdate(socket, payload = {}) {
+    const request = await Request.findById(payload?.requestId);
+    if (!request) return;
+
+    const session = activeSessions.get(socket.id);
+    if (!session) return;
+
+    const latitude = Number(payload?.coordinates?.latitude ?? payload?.latitude);
+    const longitude = Number(payload?.coordinates?.longitude ?? payload?.longitude);
+
+    if (Number.isFinite(latitude) && Number.isFinite(longitude)) {
+      activeSessions.set(socket.id, {
+        ...session,
+        latitude,
+        longitude,
+        locationSyncedAt: new Date().toISOString(),
+      });
+    }
+
+    const nextSession = activeSessions.get(socket.id);
+    const donorLat = Number(nextSession.latitude) || 0;
+    const donorLng = Number(nextSession.longitude) || 0;
+    const hospitalCoords = request.location?.coordinates || [0, 0];
+    const distanceKm = getDistance(hospitalCoords[1] || 0, hospitalCoords[0] || 0, donorLat, donorLng);
+    const etaMinutes = Math.max(3, Math.round(distanceKm * 4));
+
+    const eventPayload = {
+      requestId: request._id,
+      donorId: payload?.donorId || nextSession.userId,
+      donorName: nextSession.name,
+      coordinates: {
+        latitude: donorLat,
+        longitude: donorLng,
+      },
+      distanceKm: Number(distanceKm.toFixed(2)),
+      etaMinutes,
+    };
+
+    io.to(request.requester.toString()).emit('LOCATION_UPDATE', eventPayload);
+    io.to(request.requester.toString()).emit('DONOR_LIVE_LOCATION', eventPayload);
+  }
+
   io.getActiveSessions = () => activeSessions;
 
   io.getSessionByUserId = (userId) => {
@@ -160,60 +260,49 @@ module.exports = function setupSocket(server) {
 
     socket.on('accept_request', async (payload) => {
       try {
-        const request = await Request.findById(payload?.requestId).populate('requester', 'name');
-        if (!request) return;
-
-        const session = activeSessions.get(socket.id);
-        const donor = session?.userId ? await User.findById(session.userId).select('name bloodGroup') : null;
-        if (!session?.userId || !donor) return;
-
-        const hospitalCoords = request.location?.coordinates || [0, 0];
-        const donorLat = Number(session.latitude) || 0;
-        const donorLng = Number(session.longitude) || 0;
-        const distanceKm = getDistance(hospitalCoords[1] || 0, hospitalCoords[0] || 0, donorLat, donorLng);
-        const etaMinutes = Math.max(3, Math.round(distanceKm * 4));
-
-        io.to(request.requester._id.toString()).emit('EMERGENCY_ACCEPTED', {
-          requestId: request._id,
-          donorId: donor._id,
-          donorName: donor.name,
-          bloodGroup: session.bloodGroup || donor.bloodGroup,
-          etaMinutes,
-          distanceKm: Number(distanceKm.toFixed(2)),
-          coordinates: {
-            latitude: donorLat,
-            longitude: donorLng,
-          },
-        });
+        await emitDonorAccepted(socket, payload);
       } catch (error) {
         console.error('[Socket] accept_request error:', error);
       }
     });
 
+    socket.on('DONOR_ACCEPTED', async (payload) => {
+      try {
+        await emitDonorAccepted(socket, payload);
+      } catch (error) {
+        console.error('[Socket] DONOR_ACCEPTED error:', error);
+      }
+    });
+
     socket.on('decline_request', async (payload) => {
       try {
-        const request = await Request.findById(payload?.requestId);
-        if (!request) return;
-
-        const session = activeSessions.get(socket.id);
-        io.to(request.requester.toString()).emit('EMERGENCY_DECLINED', {
-          requestId: request._id,
-          donorId: session?.userId || null,
-          donorName: session?.name || 'Unknown donor',
-        });
+        await emitDonorDeclined(socket, payload);
       } catch (error) {
         console.error('[Socket] decline_request error:', error);
       }
     });
 
+    socket.on('DONOR_DECLINED', async (payload) => {
+      try {
+        await emitDonorDeclined(socket, payload);
+      } catch (error) {
+        console.error('[Socket] DONOR_DECLINED error:', error);
+      }
+    });
+
     socket.on('donor-location-update', async (payload) => {
       try {
-        const request = await Request.findById(payload?.requestId);
-        if (!request) return;
-
-        io.to(request.requester.toString()).emit('DONOR_LIVE_LOCATION', payload);
+        await emitLocationUpdate(socket, payload);
       } catch (error) {
         console.error('[Socket] donor-location-update error:', error);
+      }
+    });
+
+    socket.on('LOCATION_UPDATE', async (payload) => {
+      try {
+        await emitLocationUpdate(socket, payload);
+      } catch (error) {
+        console.error('[Socket] LOCATION_UPDATE error:', error);
       }
     });
 

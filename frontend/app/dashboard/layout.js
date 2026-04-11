@@ -4,19 +4,26 @@ import { useEffect, useSyncExternalStore } from 'react';
 import { useRouter } from 'next/navigation';
 import { Activity, BadgeCheck, Building2, LogOut, ShieldCheck, User } from 'lucide-react';
 import Link from 'next/link';
+import EmergencyActionDock from '../../components/EmergencyActionDock';
+import LocationSyncProvider from '../../components/LocationSyncProvider';
 import { useDpi } from '../../components/providers/DpiProvider';
 import { Badge } from '../../components/ui/badge';
-import LocationSyncProvider from '../../components/LocationSyncProvider';
 import { disconnectRealtimeSocket } from '../../lib/realtime';
+import { getSocketStoreState, resetSocketStore, socketStoreSubscribe } from '../../lib/socketStore';
 
-function subscribe() {
+function clientSubscribe() {
   return () => {};
+}
+
+function socketSubscribe(callback) {
+  return socketStoreSubscribe(callback);
 }
 
 export default function DashboardLayout({ children }) {
   const router = useRouter();
   const { clearSession } = useDpi();
-  const isClient = useSyncExternalStore(subscribe, () => true, () => false);
+  const isClient = useSyncExternalStore(clientSubscribe, () => true, () => false);
+  const { connectionStatus } = useSyncExternalStore(socketSubscribe, getSocketStoreState, getSocketStoreState);
   const token = isClient ? localStorage.getItem('token') : null;
   const user = isClient ? JSON.parse(localStorage.getItem('user') || 'null') : null;
 
@@ -31,6 +38,7 @@ export default function DashboardLayout({ children }) {
     localStorage.removeItem('user');
     sessionStorage.removeItem('lifelink-active-emergency');
     disconnectRealtimeSocket();
+    resetSocketStore();
     clearSession();
     router.push('/');
   };
@@ -45,6 +53,8 @@ export default function DashboardLayout({ children }) {
 
   const identityIcon = user.identityType === 'ABHA' ? User : user.role === 'Hospital' ? Building2 : ShieldCheck;
   const IdentityIcon = identityIcon;
+  const online = connectionStatus === 'online';
+  const connectionLabel = online ? 'System Online' : connectionStatus === 'connecting' ? 'Connecting' : 'System Offline';
 
   return (
     <div className="min-h-screen bg-brand-dark text-white flex flex-col">
@@ -60,6 +70,10 @@ export default function DashboardLayout({ children }) {
             </Link>
 
             <div className="flex items-center gap-4">
+              <div className="hidden rounded-full border border-white/10 bg-white/6 px-3 py-1.5 text-xs font-semibold text-slate-200 sm:inline-flex sm:items-center sm:gap-2">
+                <span className={`h-2.5 w-2.5 rounded-full ${online ? 'bg-emerald-400' : connectionStatus === 'connecting' ? 'bg-amber-400' : 'bg-red-400'}`}></span>
+                {connectionLabel}
+              </div>
               <div className="text-sm border-r border-white/20 pr-4 text-right space-y-1">
                 <p className="font-medium text-white">{user.name}</p>
                 <div className="flex items-center justify-end gap-2 flex-wrap">
@@ -85,7 +99,7 @@ export default function DashboardLayout({ children }) {
         </div>
       </nav>
 
-      <main className="flex-1 w-full mx-auto relative relative">
+      <main className="flex-1 w-full mx-auto relative relative pb-40">
         <div className="absolute top-0 left-1/2 -translate-x-1/2 w-full max-w-7xl h-full overflow-hidden z-0 pointer-events-none">
           <div className="absolute top-[10%] right-[10%] w-[300px] h-[300px] bg-[#0b4ea2]/10 rounded-full blur-[100px]" />
           <div className="absolute bottom-[20%] left-[5%] w-[400px] h-[400px] bg-[#ff8f1f]/8 rounded-full blur-[120px]" />
@@ -95,6 +109,7 @@ export default function DashboardLayout({ children }) {
           {children}
         </div>
       </main>
+      <EmergencyActionDock />
     </div>
   );
 }
