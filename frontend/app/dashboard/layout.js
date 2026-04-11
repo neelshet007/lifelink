@@ -1,11 +1,13 @@
-﻿'use client';
+'use client';
 
 import { useEffect, useSyncExternalStore } from 'react';
 import { useRouter } from 'next/navigation';
-import { Activity, BadgeCheck, Building2, LogOut, Shield, ShieldCheck, User } from 'lucide-react';
+import { Activity, BadgeCheck, Building2, LogOut, ShieldCheck, User } from 'lucide-react';
 import Link from 'next/link';
 import { useDpi } from '../../components/providers/DpiProvider';
 import { Badge } from '../../components/ui/badge';
+import LocationSyncProvider from '../../components/LocationSyncProvider';
+import { disconnectRealtimeSocket } from '../../lib/realtime';
 
 function subscribe() {
   return () => {};
@@ -27,6 +29,8 @@ export default function DashboardLayout({ children }) {
   const handleLogout = () => {
     localStorage.removeItem('token');
     localStorage.removeItem('user');
+    sessionStorage.removeItem('lifelink-active-emergency');
+    disconnectRealtimeSocket();
     clearSession();
     router.push('/');
   };
@@ -44,6 +48,7 @@ export default function DashboardLayout({ children }) {
 
   return (
     <div className="min-h-screen bg-brand-dark text-white flex flex-col">
+      <LocationSyncProvider />
       <nav className="glass border-b border-white/10 sticky top-0 z-50">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex justify-between h-16 items-center">
@@ -93,4 +98,3 @@ export default function DashboardLayout({ children }) {
     </div>
   );
 }
-

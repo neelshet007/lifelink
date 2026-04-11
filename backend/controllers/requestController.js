@@ -1,165 +1,190 @@
+const mongoose = require('mongoose');
 const Request = require('../models/Request');
 const User = require('../models/User');
-const mongoose = require('mongoose');
-const { getDistance, calculateScore, filterUsersWithinRadius } = require('../utils/matchingAlgorithm');
+const MockSandboxRegistry = require('../models/MockSandboxRegistry');
+const { getDistance, calculateScore, isBloodGroupCompatible } = require('../utils/matchingAlgorithm');
 
-const EMERGENCY_EXPIRY_MS = 15 * 60 * 1000; // 15 minutes
+const EMERGENCY_EXPIRY_MS = 15 * 60 * 1000;
 
 const getCompatibility = (donorBloodGroup, requestedBloodGroup) => {
   if (!donorBloodGroup) return 'Not compatible';
   if (donorBloodGroup === requestedBloodGroup) return 'Exact';
-  if (donorBloodGroup === 'O-') return 'Compatible';
-  if (requestedBloodGroup === 'AB+') return 'Compatible';
-  const base = (bg) => bg.replace('+', '').replace('-', '');
-  const isPos = (bg) => bg.includes('+');
-  if (base(donorBloodGroup) === base(requestedBloodGroup) && isPos(requestedBloodGroup) && !isPos(donorBloodGroup)) {
-    return 'Compatible';
-  }
-  return 'Not compatible';
+  return isBloodGroupCompatible(donorBloodGroup, requestedBloodGroup) ? 'Compatible' : 'Not compatible';
 };
 
 const checkEligibility = (lastDonationDate) => {
   if (!lastDonationDate) return true;
-  const days = Math.floor((new Date() - new Date(lastDonationDate)) / (1000 * 60 * 60 * 24));
+  const days = Math.floor((Date.now() - new Date(lastDonationDate).getTime()) / (1000 * 60 * 60 * 24));
   return days >= 90;
+};
+
+const resolveUserBloodGroup = async (user) => {
+  if (user?.abhaAddress) {
+    const sandboxProfile = await MockSandboxRegistry.findOne({ abhaAddress: user.abhaAddress.toLowerCase() }).select('bloodGroup');
+    if (sandboxProfile?.bloodGroup) return sandboxProfile.bloodGroup;
+  }
+
+  return user?.bloodGroup || '';
 };
 
 const createRequest = async (req, res) => {
   try {
-    const { bloodGroup, urgency, latitude, longitude } = req.body;
+    const { bloodGroup, urgency } = req.body;
     const requester = await User.findById(req.user._id);
-    const lat = parseFloat(latitude) || requester?.location?.coordinates?.[1] || 0;
-    const lng = parseFloat(longitude) || requester?.location?.coordinates?.[0] || 0;
-    const currentRegion = requester?.currentRegion || req.user.currentRegion || 'south-zone';
+    const io = req.app.get('io');
+    const activeSession = io?.getSessionByUserId?.(req.user._id);
+    const latitude = Number(activeSession?.latitude ?? requester?.location?.coordinates?.[1]);
+    const longitude = Number(activeSession?.longitude ?? requester?.location?.coordinates?.[0]);
+
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+      return res.status(400).json({ message: 'Live hospital coordinates are required before creating an emergency request.' });
+    }
 
     const request = await Request.create({
       requester: req.user._id,
       bloodGroup,
       urgency: urgency || 'Medium',
-      currentRegion,
       location: {
         type: 'Point',
-        coordinates: [lng, lat],
+        coordinates: [longitude, latitude],
       },
     });
 
     const expiresAt = new Date(request.createdAt.getTime() + EMERGENCY_EXPIRY_MS).toISOString();
-
-    const io = req.app.get('io');
-    const allUsersInRegion = await User.find({ _id: { $ne: req.user._id }, currentRegion, role: 'User' });
-    const nearbyUsers = filterUsersWithinRadius(allUsersInRegion, lat, lng, 5);
+    const notifiedSocketIds = [];
     const scoredMatches = [];
 
-    for (const user of nearbyUsers) {
-      const distance = getDistance(lat, lng, user.location.coordinates[1], user.location.coordinates[0]);
-      const compatibility = getCompatibility(user.bloodGroup, bloodGroup);
-      const available = user.isAvailable !== false;
-      const eligible = checkEligibility(user.lastDonationDate) && user.is_eligible !== false;
-      const shouldNotify = compatibility !== 'Not compatible' && available && eligible;
-
-      if (shouldNotify) {
-        const lastDonationDaysAgo = user.lastDonationDate
-          ? Math.floor((new Date() - new Date(user.lastDonationDate)) / (1000 * 60 * 60 * 24))
-          : null;
-        const score = calculateScore(distance, compatibility, user.isAvailable !== false, lastDonationDaysAgo);
-        scoredMatches.push({
-          user: {
-            _id: user._id,
-            name: user.name,
-            role: user.role,
-            distance: distance.toFixed(2),
-            email: user.email,
-          },
-          score,
-          distance,
-        });
-      }
-    }
-
-    scoredMatches.sort((a, b) => b.score - a.score);
-
-    // ─── Real-time emergency broadcast via Socket.io ─────────────────────────
-    const notifiedSocketIds = [];
-
     if (io && typeof io.getNearbyEligibleRecipients === 'function' &&
-        (req.user.role === 'Hospital' || req.user.role === 'Blood Bank')) {
-
-      const connectedRecipients = io.getNearbyEligibleRecipients({
-        latitude: lat,
-        longitude: lng,
+      (req.user.role === 'Hospital' || req.user.role === 'Blood Bank')) {
+      const recipients = io.getNearbyEligibleRecipients({
+        latitude,
+        longitude,
         bloodGroup,
         radiusKm: 5,
         excludeUserId: req.user._id,
       });
 
-      console.log(
-        `[Request] ${new Date().toISOString()} Broadcasting INCOMING_EMERGENCY to ${connectedRecipients.length} connected donor(s) for request ${request._id}.`
-      );
+      const recipientUsers = await User.find({
+        _id: { $in: recipients.map((recipient) => recipient.userId) },
+      }).select('name email isAvailable is_eligible lastDonationDate abhaAddress bloodGroup');
 
-      connectedRecipients.forEach((recipient) => {
+      const userMap = new Map(recipientUsers.map((user) => [String(user._id), user]));
+
+      for (const recipient of recipients) {
+        const donor = userMap.get(String(recipient.userId));
+        if (!donor) continue;
+
+        const donorBloodGroup = await resolveUserBloodGroup(donor);
+        const compatibility = getCompatibility(donorBloodGroup, bloodGroup);
+        const available = donor.isAvailable !== false;
+        const eligible = donor.is_eligible !== false && checkEligibility(donor.lastDonationDate);
+
+        if (compatibility === 'Not compatible' || !available || !eligible) {
+          continue;
+        }
+
+        const lastDonationDaysAgo = donor.lastDonationDate
+          ? Math.floor((Date.now() - new Date(donor.lastDonationDate).getTime()) / (1000 * 60 * 60 * 24))
+          : null;
+
+        scoredMatches.push({
+          user: {
+            _id: donor._id,
+            name: donor.name,
+            role: 'User',
+            distance: recipient.distanceKm.toFixed(2),
+            email: donor.email,
+          },
+          score: calculateScore(recipient.distanceKm, compatibility, available, lastDonationDaysAgo),
+          distance: recipient.distanceKm,
+        });
+
         io.to(recipient.socketId).emit('INCOMING_EMERGENCY', {
           requestId: request._id,
-          message: `Emergency: ${bloodGroup} needed ${recipient.distance.toFixed(1)}km away`,
           bloodGroup,
           urgency: urgency || 'Medium',
-          currentRegion,
           hospital: requester?.name || req.user.name,
           hospitalId: requester?._id || req.user._id,
           requesterRole: req.user.role,
-          distance: recipient.distance.toFixed(1),
-          hospitalCoords: { latitude: lat, longitude: lng },
+          message: `Emergency: ${bloodGroup} needed ${recipient.distanceKm.toFixed(1)} km away`,
+          distance: recipient.distanceKm.toFixed(1),
+          distanceKm: Number(recipient.distanceKm.toFixed(2)),
+          hospitalCoords: { latitude, longitude },
           createdAt: request.createdAt,
           expiresAt,
         });
-        notifiedSocketIds.push(recipient.socketId);
-      });
 
-      // Register notified sockets so we can send expiry events later
+        notifiedSocketIds.push(recipient.socketId);
+      }
+
+      scoredMatches.sort((a, b) => b.score - a.score);
+      request.notifiedDonorCount = notifiedSocketIds.length;
+      await request.save();
+
       if (typeof io.trackNotifiedSockets === 'function') {
         io.trackNotifiedSockets(request._id, notifiedSocketIds);
       }
 
-      // Schedule automatic expiry broadcast after 15 minutes
       setTimeout(() => {
         if (typeof io.emitRequestExpired === 'function') {
           io.emitRequestExpired(request._id, expiresAt);
         }
 
-        // Also update the request status to Expired if still Pending
         Request.findOneAndUpdate(
           { _id: request._id, status: 'Pending' },
           { $set: { status: 'Expired' } }
-        ).catch((err) => console.error('[Request] Failed to mark request as Expired:', err));
-
-        console.log(`[Request] ${new Date().toISOString()} Request ${request._id} expired — notified ${notifiedSocketIds.length} donor(s).`);
+        ).catch((err) => console.error('[Request] Failed to mark request as expired:', err));
       }, EMERGENCY_EXPIRY_MS);
     }
 
-    res.status(201).json({ request, matches: scoredMatches });
+    return res.status(201).json({
+      request,
+      matches: scoredMatches,
+      meta: {
+        notifiedDonorCount: notifiedSocketIds.length,
+        radiusKm: 5,
+        hospitalCoords: { latitude, longitude },
+      },
+    });
   } catch (error) {
     console.error('createRequest error:', error);
-    res.status(500).json({ message: 'Server error' });
+    return res.status(500).json({ message: 'Server error' });
   }
 };
 
 const getMyRequests = async (req, res) => {
   try {
     const requests = await Request.find({ requester: req.user._id }).populate('handledBy', 'name').sort({ createdAt: -1 });
-    res.json(requests);
+    return res.json(requests);
   } catch (error) {
-    res.status(500).json({ message: 'Server error' });
+    return res.status(500).json({ message: 'Server error' });
   }
 };
 
 const getIncomingRequests = async (req, res) => {
   try {
+    const user = await User.findById(req.user._id).select('location bloodGroup abhaAddress');
+    const donorBloodGroup = await resolveUserBloodGroup(user);
+    const latitude = user?.location?.coordinates?.[1];
+    const longitude = user?.location?.coordinates?.[0];
+
     const requests = await Request
-      .find({ currentRegion: req.user.currentRegion })
-      .populate('requester', 'name email location currentRegion')
+      .find({ status: 'Pending' })
+      .populate('requester', 'name email location')
       .sort({ createdAt: -1 });
-    res.json(requests);
+
+    const nearbyRequests = requests.filter((request) => {
+      const requestLatitude = request.location?.coordinates?.[1];
+      const requestLongitude = request.location?.coordinates?.[0];
+      if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return false;
+      if (!Number.isFinite(requestLatitude) || !Number.isFinite(requestLongitude)) return false;
+      if (!isBloodGroupCompatible(donorBloodGroup, request.bloodGroup)) return false;
+      return getDistance(latitude, longitude, requestLatitude, requestLongitude) <= 5;
+    });
+
+    return res.json(nearbyRequests);
   } catch (error) {
-    res.status(500).json({ message: 'Server error' });
+    return res.status(500).json({ message: 'Server error' });
   }
 };
 
@@ -201,10 +226,10 @@ const updateRequestStatus = async (req, res) => {
     if (!request) return res.status(404).json({ message: 'Request not found' });
     request.status = status;
     const saved = await request.save();
-    res.json(saved);
+    return res.json(saved);
   } catch (error) {
     console.error('updateRequestStatus error:', error);
-    res.status(500).json({ message: 'Server error' });
+    return res.status(500).json({ message: 'Server error' });
   }
 };
 
@@ -222,9 +247,8 @@ const getRequestMatches = async (req, res) => {
       .map((donor) => {
         const compat = getCompatibility(donor.bloodGroup, request.bloodGroup);
         const lastDonationDaysAgo = donor.lastDonationDate
-          ? Math.floor((new Date() - new Date(donor.lastDonationDate)) / (1000 * 60 * 60 * 24))
+          ? Math.floor((Date.now() - new Date(donor.lastDonationDate).getTime()) / (1000 * 60 * 60 * 24))
           : null;
-        const score = calculateScore(0, compat, true, lastDonationDaysAgo);
         return {
           _id: donor._id,
           name: donor.name,
@@ -234,15 +258,21 @@ const getRequestMatches = async (req, res) => {
           contact: donor.contact,
           barcodeId: donor.barcodeId,
           donationHistory: donor.donationHistory,
-          score,
+          score: calculateScore(0, compat, true, lastDonationDaysAgo),
         };
       });
 
-    const allUsers = await User.find({ role: 'User', _id: { $ne: request.requester }, currentRegion: request.currentRegion });
+    const allUsers = await User.find({ role: 'User', _id: { $ne: request.requester } });
     const platformMatches = allUsers
       .filter((user) => {
         const compat = getCompatibility(user.bloodGroup, request.bloodGroup);
-        return compat !== 'Not compatible' && user.isAvailable !== false && checkEligibility(user.lastDonationDate) && user.is_eligible !== false;
+        if (compat === 'Not compatible') return false;
+        if (user.isAvailable === false || user.is_eligible === false || !checkEligibility(user.lastDonationDate)) return false;
+        const userLat = user.location?.coordinates?.[1];
+        const userLng = user.location?.coordinates?.[0];
+        const requestLat = request.location?.coordinates?.[1];
+        const requestLng = request.location?.coordinates?.[0];
+        return Number.isFinite(userLat) && Number.isFinite(userLng) && getDistance(requestLat, requestLng, userLat, userLng) <= 5;
       })
       .map((user) => {
         const distance = getDistance(
@@ -253,16 +283,24 @@ const getRequestMatches = async (req, res) => {
         );
         const compat = getCompatibility(user.bloodGroup, request.bloodGroup);
         const lastDonationDaysAgo = user.lastDonationDate
-          ? Math.floor((new Date() - new Date(user.lastDonationDate)) / (1000 * 60 * 60 * 24))
+          ? Math.floor((Date.now() - new Date(user.lastDonationDate).getTime()) / (1000 * 60 * 60 * 24))
           : null;
-        const score = calculateScore(distance, compat, true, lastDonationDaysAgo);
-        return { _id: user._id, name: user.name, type: 'Platform', bloodGroup: user.bloodGroup, score, contact: user.contact, age: user.age };
+        return {
+          _id: user._id,
+          name: user.name,
+          type: 'Platform',
+          bloodGroup: user.bloodGroup,
+          score: calculateScore(distance, compat, true, lastDonationDaysAgo),
+          contact: user.contact,
+          age: user.age,
+          distance: Number(distance.toFixed(2)),
+        };
       });
 
-    res.json([...internalMatches, ...platformMatches].sort((a, b) => b.score - a.score));
+    return res.json([...internalMatches, ...platformMatches].sort((a, b) => b.score - a.score));
   } catch (error) {
     console.error('getRequestMatches error:', error);
-    res.status(500).json({ message: 'Server error' });
+    return res.status(500).json({ message: 'Server error' });
   }
 };
 
@@ -273,25 +311,25 @@ const assignDonor = async (req, res) => {
     let targetDonor = null;
     let targetDonorType = null;
 
-    if (hospital && hospital.internalDonorDatabase) {
+    if (hospital?.internalDonorDatabase) {
       targetDonor = hospital.internalDonorDatabase.find(
-        (d) => (d.barcodeId && d.barcodeId === assignedDonorId) || (d.contact && d.contact === phoneNumber)
+        (donor) => (donor.barcodeId && donor.barcodeId === assignedDonorId) || (donor.contact && donor.contact === phoneNumber)
       );
       if (targetDonor) targetDonorType = 'Internal';
     }
 
     if (!targetDonor && assignedDonorId && mongoose.isValidObjectId(assignedDonorId)) {
       targetDonor = await User.findById(assignedDonorId);
-      if (targetDonor && targetDonor.role === 'User') targetDonorType = 'Platform';
+      if (targetDonor?.role === 'User') targetDonorType = 'Platform';
       else targetDonor = null;
     }
 
     if (!targetDonor) return res.status(404).json({ message: 'User Not Found.' });
     if (targetDonor.is_eligible === false || !checkEligibility(targetDonor.lastDonationDate)) {
-      const cdDate = targetDonor.lastDonationDate
+      const cooldownDate = targetDonor.lastDonationDate
         ? new Date(new Date(targetDonor.lastDonationDate).getTime() + 90 * 24 * 60 * 60 * 1000).toLocaleDateString()
         : 'unknown';
-      return res.status(403).json({ message: `User found but ineligible: 90-day cooldown active until ${cdDate}.` });
+      return res.status(403).json({ message: `User found but ineligible: 90-day cooldown active until ${cooldownDate}.` });
     }
 
     const request = await Request.findById(req.params.id);
@@ -318,13 +356,11 @@ const assignDonor = async (req, res) => {
 
     const io = req.app.get('io');
     if (io) {
-      // Notify the requester (hospital side listener)
       io.to(request.requester.toString()).emit('request-completed', {
         requestId: request._id,
         message: `Your blood request has been fulfilled by ${req.user.name}`,
       });
 
-      // Notify the donor that the request is fulfilled so their Emergency Tab clears
       const donorId = targetDonorType === 'Platform' ? targetDonor._id.toString() : null;
       if (donorId) {
         io.to(donorId).emit('REQUEST_FULFILLED', {
@@ -336,10 +372,10 @@ const assignDonor = async (req, res) => {
       io.emit('request-updated', { requestId: request._id, status: 'Fulfilled' });
     }
 
-    res.json(updatedRequest);
+    return res.json(updatedRequest);
   } catch (error) {
     console.error('assignDonor error:', error);
-    res.status(500).json({ message: 'Server error' });
+    return res.status(500).json({ message: 'Server error' });
   }
 };
 

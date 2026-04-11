@@ -33,9 +33,8 @@ const mockAbhaRegisterSchema = Joi.object({
   name: Joi.string().min(2).max(100).required(),
   aadhaar: Joi.string().pattern(/^\d{12}$/).required(),
   email: Joi.string().email().required(),
-  dob: Joi.string().required(),
-  gender: Joi.string().valid('male', 'female', 'other').required(),
-  currentRegion: Joi.string().valid('north-zone', 'south-zone', 'west-zone', 'east-zone', 'central-zone').optional().default('south-zone'),
+  dob: Joi.string().optional(),
+  gender: Joi.string().valid('male', 'female', 'other', 'unknown').optional(),
 }).options({ allowUnknown: true, stripUnknown: true });
 
 const completeProfileSchema = Joi.object({
@@ -49,6 +48,10 @@ const facilityOnboardingSchema = Joi.object({
   governmentRegNo: Joi.string().trim().min(4).max(60).required(),
   administratorAadhaar: Joi.string().pattern(/^\d{12}$/).required(),
   email: Joi.string().email().required(),
+  contact: Joi.string().optional().allow(''),
+  address: Joi.string().optional().allow(''),
+  latitude: Joi.number().min(-90).max(90).optional().allow('', null),
+  longitude: Joi.number().min(-180).max(180).optional().allow('', null),
 }).options({ allowUnknown: true, stripUnknown: true });
 
 const updateLocationSchema = Joi.object({

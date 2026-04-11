@@ -18,6 +18,20 @@ function getDistance(lat1, lon1, lat2, lon2) {
   return R * c; 
 }
 
+function isBloodGroupCompatible(donorBloodGroup, requestedBloodGroup) {
+  if (!donorBloodGroup || !requestedBloodGroup) return false;
+  if (donorBloodGroup === requestedBloodGroup) return true;
+  if (donorBloodGroup === 'O-') return true;
+  if (requestedBloodGroup === 'AB+') return true;
+
+  const base = (bg) => String(bg).replace('+', '').replace('-', '');
+  const isPositive = (bg) => String(bg).includes('+');
+
+  return base(donorBloodGroup) === base(requestedBloodGroup)
+    && isPositive(requestedBloodGroup)
+    && !isPositive(donorBloodGroup);
+}
+
 /**
  * Calculates a match score (max 1.0) based on formula:
  * (0.4 * Distance Score) + (0.3 * Compatibility Score) + (0.2 * Availability Score) + (0.1 * Eligibility Score)
@@ -51,14 +65,6 @@ function calculateScore(distance, bloodCompatibility, isAvailable, lastDonationD
   return (0.4 * distanceScore) + (0.3 * compScore) + (0.2 * availabilityScore) + (0.1 * eligibilityScore);
 }
 
-function filterUsersByRegionAndBloodGroup(users, currentRegion, bloodGroup) {
-  return users.filter((user) => {
-    const sameRegion = user.currentRegion === currentRegion;
-    const compatibleBloodGroup = !bloodGroup || !user.bloodGroup || user.bloodGroup === bloodGroup || user.bloodGroup === 'O-';
-    return sameRegion && compatibleBloodGroup;
-  });
-}
-
 function filterUsersWithinRadius(users, latitude, longitude, radiusKm = 5) {
   return users.filter((user) => {
     const userLatitude = user?.location?.coordinates?.[1];
@@ -72,7 +78,7 @@ function filterUsersWithinRadius(users, latitude, longitude, radiusKm = 5) {
 
 module.exports = {
   getDistance,
+  isBloodGroupCompatible,
   calculateScore,
-  filterUsersByRegionAndBloodGroup,
   filterUsersWithinRadius
 };

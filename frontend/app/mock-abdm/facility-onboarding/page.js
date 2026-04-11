@@ -4,6 +4,7 @@ import { useRouter } from 'next/navigation';
 import { useState } from 'react';
 import axios from 'axios';
 import { Activity, Building2, ShieldCheck } from 'lucide-react';
+import { API_URL } from '../../../lib/session';
 
 export default function FacilityOnboardingPage() {
   const router = useRouter();
@@ -13,25 +14,59 @@ export default function FacilityOnboardingPage() {
     governmentRegNo: '',
     administratorAadhaar: '',
     email: '',
+    contact: '',
+    address: '',
   });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [credentials, setCredentials] = useState(null);
 
-  const handleSubmit = async (e) => {
-    e.preventDefault();
+  const handleSubmit = async (event) => {
+    event.preventDefault();
     setLoading(true);
     setError('');
 
-    try {
-      const res = await axios.post('http://localhost:5000/api/auth/mock-abdm/facility-onboarding', form);
+    const submit = async (locationPayload = {}) => {
+      const res = await axios.post(`${API_URL}/api/auth/mock-abdm/facility-onboarding`, {
+        ...form,
+        ...locationPayload,
+      });
       setCredentials(res.data.credentials);
       localStorage.setItem('token', res.data.token);
       localStorage.setItem('user', JSON.stringify(res.data.user));
       sessionStorage.setItem('lifelink-gateway-session', JSON.stringify(res.data));
       setTimeout(() => {
         router.push('/login?gateway_return=1');
-      }, 1500);
+      }, 1200);
+    };
+
+    try {
+      if (navigator.geolocation) {
+        navigator.geolocation.getCurrentPosition(
+          async ({ coords }) => {
+            try {
+              await submit({ latitude: coords.latitude, longitude: coords.longitude });
+            } catch (err) {
+              setError(err.response?.data?.message || err.message || 'Facility onboarding failed');
+            } finally {
+              setLoading(false);
+            }
+          },
+          async () => {
+            try {
+              await submit();
+            } catch (err) {
+              setError(err.response?.data?.message || err.message || 'Facility onboarding failed');
+            } finally {
+              setLoading(false);
+            }
+          },
+          { enableHighAccuracy: true, timeout: 10000 }
+        );
+        return;
+      }
+
+      await submit();
     } catch (err) {
       setError(err.response?.data?.message || err.message || 'Facility onboarding failed');
     } finally {
@@ -49,14 +84,17 @@ export default function FacilityOnboardingPage() {
             <h1 className="mt-2 text-3xl font-semibold">Facility Onboarding</h1>
           </div>
         </div>
-        <p className="mt-4 text-sm text-slate-200">Register a Hospital or Blood Bank into the mock ABDM ecosystem. We will generate a government-style facility ID, an HFR ID, and a DCGI code for blood banks.</p>
+        <p className="mt-4 text-sm text-slate-200">
+          Register a hospital or blood bank, generate a mock HFR certificate immediately, and issue a DCGI license automatically for blood banks.
+        </p>
         {error && <div className="mt-4 rounded-[1rem] border border-red-300/30 bg-red-500/10 px-4 py-3 text-sm text-red-100">{error}</div>}
         {credentials && (
           <div className="mt-4 rounded-[1rem] border border-emerald-300/30 bg-emerald-500/10 px-4 py-4 text-sm text-emerald-50">
             <div className="flex items-center gap-2 font-semibold"><ShieldCheck className="h-4 w-4" />Facility verified in the sandbox registry</div>
             <p className="mt-2">ABDM Facility ID: {credentials.facilityAbdmId}</p>
             <p className="mt-1">HFR ID: {credentials.hfrFacilityId}</p>
-            {credentials.dcgiLicenseNumber && <p className="mt-1">DCGI License: {credentials.dcgiLicenseNumber}</p>}
+            <p className="mt-1">Mock HFR Certificate: {credentials.hfrCertificateNumber}</p>
+            {credentials.dcgiLicenseNumber && <p className="mt-1">Mock DCGI License: {credentials.dcgiLicenseNumber}</p>}
           </div>
         )}
         <form onSubmit={handleSubmit} className="mt-6 grid gap-4 md:grid-cols-2">
@@ -64,11 +102,13 @@ export default function FacilityOnboardingPage() {
           <select value={form.category} onChange={(e) => setForm((prev) => ({ ...prev, category: e.target.value }))} className="w-full rounded-[1rem] border border-white/15 bg-white/10 px-4 py-3 text-white outline-none">
             {['Hospital', 'Blood Bank'].map((category) => <option key={category} value={category} className="bg-slate-900">{category}</option>)}
           </select>
-          <input value={form.governmentRegNo} onChange={(e) => setForm((prev) => ({ ...prev, governmentRegNo: e.target.value }))} placeholder="Government Reg No / Certificate No" className="w-full rounded-[1rem] border border-white/15 bg-white/10 px-4 py-3 text-white outline-none" required />
+          <input value={form.governmentRegNo} onChange={(e) => setForm((prev) => ({ ...prev, governmentRegNo: e.target.value }))} placeholder="Government Registration Number" className="w-full rounded-[1rem] border border-white/15 bg-white/10 px-4 py-3 text-white outline-none" required />
           <input value={form.administratorAadhaar} onChange={(e) => setForm((prev) => ({ ...prev, administratorAadhaar: e.target.value.replace(/\D/g, '').slice(0, 12) }))} placeholder="Administrator Aadhaar" className="w-full rounded-[1rem] border border-white/15 bg-white/10 px-4 py-3 text-white outline-none" required />
-          <input type="email" value={form.email} onChange={(e) => setForm((prev) => ({ ...prev, email: e.target.value }))} placeholder="Administrator Email" className="w-full rounded-[1rem] border border-white/15 bg-white/10 px-4 py-3 text-white outline-none" required />
+          <input type="email" value={form.email} onChange={(e) => setForm((prev) => ({ ...prev, email: e.target.value }))} placeholder="Admin Email" className="w-full rounded-[1rem] border border-white/15 bg-white/10 px-4 py-3 text-white outline-none" required />
+          <input value={form.contact} onChange={(e) => setForm((prev) => ({ ...prev, contact: e.target.value }))} placeholder="Contact Number" className="w-full rounded-[1rem] border border-white/15 bg-white/10 px-4 py-3 text-white outline-none" />
+          <input value={form.address} onChange={(e) => setForm((prev) => ({ ...prev, address: e.target.value }))} placeholder="Facility Address" className="w-full rounded-[1rem] border border-white/15 bg-white/10 px-4 py-3 text-white outline-none md:col-span-2" />
           <button type="submit" className="w-full rounded-[1rem] bg-[#FF9933] px-4 py-3 font-semibold text-[#003366] hover:bg-[#ffad52] md:col-span-2">
-            {loading ? <span className="inline-flex items-center gap-2"><Activity className="h-4 w-4 animate-spin" />Verifying and issuing registry IDs...</span> : 'Register Facility'}
+            {loading ? <span className="inline-flex items-center gap-2"><Activity className="h-4 w-4 animate-spin" />Issuing facility credentials...</span> : 'Register Facility'}
           </button>
         </form>
       </div>

@@ -1,4 +1,4 @@
-﻿const mongoose = require('mongoose');
+const mongoose = require('mongoose');
 
 const internalDonorSchema = new mongoose.Schema({
   name: { type: String, required: true },
@@ -49,7 +49,6 @@ const userSchema = new mongoose.Schema({
   facilityType: { type: String, default: '' },
   licenseStatus: { type: String, default: '' },
   license_type: { type: String, default: '' },
-  currentRegion: { type: String, default: 'south-zone' },
   verificationTier: { type: String, default: 'Facility-Verified' },
   verificationSourceId: { type: String, default: '' },
   lastAbdmSyncAt: { type: Date },
@@ -72,4 +71,3 @@ const userSchema = new mongoose.Schema({
 userSchema.index({ location: '2dsphere' });
 
 module.exports = mongoose.model('User', userSchema);
-

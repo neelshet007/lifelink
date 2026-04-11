@@ -1,698 +1,252 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
-import { io } from 'socket.io-client';
-import { motion, AnimatePresence } from 'framer-motion';
-import {
-  Activity,
-  ArrowUpRight,
-  BadgeCheck,
-  BellRing,
-  BrainCircuit,
-  Building2,
-  CheckCircle2,
-  Download,
-  Droplets,
-  MapPinned,
-  Navigation,
-  Search,
-  ShieldCheck,
-  Siren,
-  Users,
-  X,
-} from 'lucide-react';
-import PredictiveDemandChart from '../../../components/PredictiveDemandChart';
-import { useDpi } from '../../../components/providers/DpiProvider';
+import { Activity, BadgeCheck, Building2, Download, MapPin, Navigation, Search, Siren, UserRoundPlus } from 'lucide-react';
 import { Badge } from '../../../components/ui/badge';
 import { Button } from '../../../components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../../../components/ui/card';
+import { getRealtimeSocket } from '../../../lib/realtime';
+import { API_URL, getStoredUser, getToken } from '../../../lib/session';
 
-function subscribe() {
-  return () => {};
-}
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000';
-
-// ─── Donor Accepted Banner ────────────────────────────────────────────────────
-function DonorAcceptedBanner({ data, onDismiss }) {
-  return (
-    <motion.div
-      key="donor-accepted-banner"
-      initial={{ opacity: 0, y: -20, scale: 0.97 }}
-      animate={{ opacity: 1, y: 0, scale: 1 }}
-      exit={{ opacity: 0, y: -16, scale: 0.97 }}
-      transition={{ type: 'spring', stiffness: 320, damping: 26 }}
-      className="relative overflow-hidden rounded-[1.6rem] border-2 border-emerald-400/50 bg-[linear-gradient(135deg,rgba(16,185,129,0.22),rgba(5,150,105,0.10))] p-6 shadow-[0_8px_40px_rgba(16,185,129,0.22)] backdrop-blur-sm"
-    >
-      {/* Shimmer bar */}
-      <div className="absolute inset-x-0 top-0 h-0.5 bg-gradient-to-r from-emerald-400 via-teal-300 to-emerald-400 bg-[length:200%_100%] animate-[shimmer_2s_linear_infinite]" />
-
-      <div className="flex items-start justify-between gap-4">
-        <div className="flex items-start gap-4">
-          <div className="flex h-12 w-12 flex-shrink-0 items-center justify-center rounded-full bg-emerald-500/25 ring-2 ring-emerald-400/50">
-            <Navigation className="h-6 w-6 text-emerald-300 animate-pulse" />
-          </div>
-          <div>
-            <p className="text-xs font-bold uppercase tracking-[0.22em] text-emerald-300">✅ Emergency Accepted</p>
-            <h3 className="mt-1 text-xl font-semibold text-white">
-              Donor <span className="text-emerald-300">{data.donorName}</span> is on the way!
-            </h3>
-            <p className="mt-2 text-sm text-slate-200">
-              ETA: <span className="font-bold text-white">{data.etaMinutes} mins</span>
-              {data.bloodGroup && <> · Blood Group: <span className="font-bold text-emerald-300">{data.bloodGroup}</span></>}
-            </p>
-            {data.coordinates?.latitude ? (
-              <p className="mt-1 text-xs font-mono text-slate-400">
-                Live coords: {data.coordinates.latitude.toFixed(4)}, {data.coordinates.longitude.toFixed(4)}
-              </p>
-            ) : null}
-          </div>
-        </div>
-        <button
-          onClick={onDismiss}
-          className="flex-shrink-0 rounded-full p-1.5 text-emerald-300/70 hover:text-emerald-200 hover:bg-emerald-900/40 transition-colors"
-          aria-label="Dismiss banner"
-        >
-          <X className="h-4 w-4" />
-        </button>
-      </div>
-    </motion.div>
-  );
-}
-
-// ─── Main Hospital Dashboard ──────────────────────────────────────────────────
 export default function HospitalDashboard() {
-  const { proofs, summonEvents, markSummonStarted, markSummonComplete } = useDpi();
-  const isClient = useSyncExternalStore(subscribe, () => true, () => false);
-
-  const gatewayUser = useMemo(() => {
-    if (!isClient) return null;
-    try { return JSON.parse(localStorage.getItem('user') || 'null'); } catch { return null; }
-  }, [isClient]);
-
-  const token = useMemo(() => {
-    if (!isClient) return null;
-    return localStorage.getItem('token');
-  }, [isClient]);
-
-  const socketRef = useRef(null);
-  const [activeSummon, setActiveSummon] = useState(null);
-  const [liveFeed, setLiveFeed] = useState([]);
+  const user = useMemo(() => getStoredUser(), []);
+  const token = useMemo(() => getToken(), []);
   const [requestDraft, setRequestDraft] = useState({ bloodGroup: 'O-', urgency: 'Critical' });
-  const [requesting, setRequesting] = useState(false);
   const [requestResult, setRequestResult] = useState(null);
-  const [lookupAbha, setLookupAbha] = useState('neel@abha');
+  const [requesting, setRequesting] = useState(false);
+  const [acceptedEmergency, setAcceptedEmergency] = useState(null);
+  const [lookupValue, setLookupValue] = useState('');
   const [lookupProfile, setLookupProfile] = useState(null);
-  const [lookupLoading, setLookupLoading] = useState(false);
   const [ledger, setLedger] = useState({ entries: [] });
   const [statusMessage, setStatusMessage] = useState('');
-  const [acceptedEmergency, setAcceptedEmergency] = useState(null);
-  const [showAcceptedBanner, setShowAcceptedBanner] = useState(false);
-  const [declineMessage, setDeclineMessage] = useState('');
-  const [etaDisplay, setEtaDisplay] = useState('');   // live countdown for accepted ETA
-
-  const gatewayUserId = gatewayUser?._id || null;
-  const latestProof = proofs[0];
-  const latestLiveSignal = liveFeed[0];
-  const issueBloodEnabled = gatewayUser?.role !== 'Blood Bank' || gatewayUser?.license_type === 'DCGI_Verified';
-
-  const summaryItems = useMemo(() => ([
-    {
-      label: gatewayUser?.role === 'Blood Bank' ? 'DCGI License' : 'HFR Facility ID',
-      value: gatewayUser?.dcgiLicenseNumber || gatewayUser?.hfrFacilityId || 'Unavailable',
-      tone: 'text-[#8bc0ff]',
-    },
-    {
-      label: 'Current Region',
-      value: gatewayUser?.currentRegion || 'south-zone',
-      tone: 'text-emerald-300',
-    },
-    {
-      label: 'Ledger Entries',
-      value: String(ledger.entries?.length || 0),
-      tone: 'text-[#ffbf73]',
-    },
-  ]), [gatewayUser, ledger.entries]);
-
-  // ── Socket connection with auto-reconnect ──────────────────────────────────
-  useEffect(() => {
-    if (!gatewayUserId) return;
-
-    const socket = io(API_URL, {
-      reconnection: true,
-      reconnectionAttempts: Infinity,
-      reconnectionDelay: 1000,
-      reconnectionDelayMax: 5000,
-    });
-
-    const doJoin = () => {
-      socket.emit('join', gatewayUserId);
-      socket.emit('join-role', 'facility-command');
-      socket.emit('join-region', gatewayUser.currentRegion || 'south-zone');
-    };
-
-    doJoin();
-
-    // Re-join rooms after reconnect
-    socket.on('connect', () => {
-      console.log('[HospitalSocket] (Re)connected:', socket.id);
-      doJoin();
-    });
-
-    socket.on('donor-live-location', (payload) => {
-      setLiveFeed((prev) => [payload, ...prev].slice(0, 5));
-    });
-
-    socket.on('DONOR_LIVE_LOCATION', (payload) => {
-      setLiveFeed((prev) => [payload, ...prev.filter((e) => e.requestId !== payload.requestId)].slice(0, 5));
-      setAcceptedEmergency((prev) => prev && prev.requestId === payload.requestId ? {
-        ...prev,
-        etaMinutes: payload.etaMinutes,
-        coordinates: payload.coordinates,
-        donorName: payload.donorName || prev.donorName,
-      } : prev);
-    });
-
-    socket.on('EMERGENCY_ACCEPTED', (payload) => {
-      setAcceptedEmergency(payload);
-      setShowAcceptedBanner(true);
-      setDeclineMessage('');
-      // Clear general status message so we don't duplicate
-      setStatusMessage('');
-    });
-
-    socket.on('EMERGENCY_DECLINED', (payload) => {
-      setDeclineMessage(`Donor ${payload.donorName} declined the active emergency.`);
-      // Auto-clear after 8 seconds
-      setTimeout(() => setDeclineMessage(''), 8000);
-    });
-
-    // A fulfilled request clears the accepted emergency panel
-    socket.on('request-completed', () => {
-      setTimeout(() => {
-        setAcceptedEmergency(null);
-        setShowAcceptedBanner(false);
-      }, 5000); // keep it visible for 5s so staff can see
-    });
-
-    socketRef.current = socket;
-    return () => socket.disconnect();
-  }, [gatewayUserId, gatewayUser?.currentRegion]);
-
-  // ── Live ETA countdown once a donor accepts ────────────────────────────────
-  useEffect(() => {
-    if (!acceptedEmergency?.etaMinutes) {
-      setEtaDisplay('');
-      return undefined;
-    }
-    // Record the moment acceptance was received
-    const acceptedAt = Date.now();
-    const totalMs = acceptedEmergency.etaMinutes * 60 * 1000;
-
-    const tick = () => {
-      const remaining = totalMs - (Date.now() - acceptedAt);
-      if (remaining <= 0) {
-        setEtaDisplay('Arrived ✅');
-        return;
-      }
-      const mins = Math.floor(remaining / 60000);
-      const secs = String(Math.floor((remaining % 60000) / 1000)).padStart(2, '0');
-      setEtaDisplay(`${mins}:${secs}`);
-    };
-
-    tick(); // Render immediately
-    const intervalId = setInterval(tick, 1000);
-    return () => clearInterval(intervalId);
-  }, [acceptedEmergency?.etaMinutes]);
 
   useEffect(() => {
-    if (!token || !gatewayUserId) return;
-
-    const loadLedger = async () => {
-      try {
-        const res = await axios.get(`${API_URL}/api/hospital/ledger`, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        setLedger(res.data || { entries: [] });
-      } catch {
-        setLedger({ entries: [] });
-      }
+    const socket = getRealtimeSocket();
+    const onAccepted = (payload) => setAcceptedEmergency(payload);
+    const onDeclined = (payload) => setStatusMessage(`Donor ${payload.donorName} declined the emergency.`);
+    const onLocation = (payload) => {
+      setAcceptedEmergency((current) => current && String(current.requestId) === String(payload.requestId)
+        ? { ...current, ...payload }
+        : current);
     };
 
-    loadLedger();
-  }, [gatewayUserId, token]);
+    socket.on('EMERGENCY_ACCEPTED', onAccepted);
+    socket.on('EMERGENCY_DECLINED', onDeclined);
+    socket.on('DONOR_LIVE_LOCATION', onLocation);
 
-  const handleSummon = async (proof) => {
-    setActiveSummon(proof.id);
-    markSummonStarted(proof.id);
-    await new Promise((resolve) => setTimeout(resolve, 1600));
-    markSummonComplete(proof.id);
-    setActiveSummon(null);
-  };
+    return () => {
+      socket.off('EMERGENCY_ACCEPTED', onAccepted);
+      socket.off('EMERGENCY_DECLINED', onDeclined);
+      socket.off('DONOR_LIVE_LOCATION', onLocation);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!token) return;
+    axios.get(`${API_URL}/api/hospital/ledger`, {
+      headers: { Authorization: `Bearer ${token}` },
+    }).then((res) => setLedger(res.data || { entries: [] })).catch(() => setLedger({ entries: [] }));
+  }, [token]);
 
   const handleCreateRequest = async () => {
     if (!token) return;
     setRequesting(true);
     setStatusMessage('');
-    setDeclineMessage('');
     try {
       const res = await axios.post(`${API_URL}/api/requests`, requestDraft, {
         headers: { Authorization: `Bearer ${token}` },
       });
       setRequestResult(res.data);
-      setStatusMessage(`Regional alert created. ${res.data.matches?.length || 0} candidates matched in ${gatewayUser?.currentRegion || 'your region'}.`);
+      setStatusMessage(`Realtime broadcast sent. ${res.data.meta?.notifiedDonorCount || 0} verified donors received the emergency within 5 km.`);
     } catch (error) {
-      setStatusMessage(error.response?.data?.message || 'Regional request creation failed.');
+      setStatusMessage(error.response?.data?.message || 'Unable to create realtime emergency.');
     } finally {
       setRequesting(false);
     }
   };
 
   const handleLookup = async () => {
-    if (!token) return;
-    setLookupLoading(true);
+    if (!token || !lookupValue.trim()) return;
     setStatusMessage('');
     try {
-      const res = await axios.get(
-        `${API_URL}/api/hospital/sandbox-profile/${encodeURIComponent(lookupAbha.trim().toLowerCase())}`,
-        { headers: { Authorization: `Bearer ${token}` } }
-      );
+      const res = await axios.get(`${API_URL}/api/hospital/sandbox-profile/${encodeURIComponent(lookupValue.trim())}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
       setLookupProfile(res.data);
     } catch (error) {
       setLookupProfile(null);
-      setStatusMessage(error.response?.data?.message || 'ABHA profile lookup failed.');
-    } finally {
-      setLookupLoading(false);
+      setStatusMessage(error.response?.data?.message || 'ABHA lookup failed.');
     }
   };
 
   const handleLedgerIntake = async () => {
     if (!token || !lookupProfile) return;
-    setStatusMessage('');
     try {
-      const res = await axios.post(
-        `${API_URL}/api/hospital/ledger/intake`,
-        { abhaAddress: lookupProfile.abhaAddress },
-        { headers: { Authorization: `Bearer ${token}` } }
-      );
+      const res = await axios.post(`${API_URL}/api/hospital/ledger/intake`, {
+        abhaAddress: lookupProfile.abhaAddress,
+      }, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
       setLedger(res.data);
       setStatusMessage('Donor added to the facility private ledger.');
     } catch (error) {
-      setStatusMessage(error.response?.data?.message || 'Could not add donor to the facility ledger.');
+      setStatusMessage(error.response?.data?.message || 'Unable to add donor to the private ledger.');
     }
   };
 
-  const handleExportLedger = async () => {
+  const handleExport = async () => {
     if (!token) return;
-    try {
-      const res = await axios.get(`${API_URL}/api/hospital/ledger/export`, {
-        headers: { Authorization: `Bearer ${token}` },
-        responseType: 'blob',
-      });
-      const blob = new Blob([res.data], { type: 'text/csv;charset=utf-8;' });
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = `${(gatewayUser?.name || 'facility').replace(/\s+/g, '-').toLowerCase()}-drive-data.csv`;
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      URL.revokeObjectURL(url);
-      setStatusMessage('Facility ledger exported successfully.');
-    } catch (error) {
-      setStatusMessage(error.response?.data?.message || 'Ledger export failed.');
-    }
+    const res = await axios.get(`${API_URL}/api/hospital/ledger/export`, {
+      headers: { Authorization: `Bearer ${token}` },
+      responseType: 'blob',
+    });
+
+    const blob = new Blob([res.data], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `${(user?.name || 'facility').replace(/\s+/g, '-').toLowerCase()}-private-ledger.csv`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
   };
 
   return (
-    <div className="space-y-8">
-      {/* ── Hero Card ─────────────────────────────────────────────────────── */}
-      <Card className="overflow-hidden border-[#0b4ea2]/25">
-        <CardContent className="grid-shell relative grid gap-6 p-8 lg:grid-cols-[1.2fr_0.8fr]">
-          <div className="absolute left-0 top-0 h-full w-full bg-[radial-gradient(circle_at_top_right,rgba(255,143,31,0.16),transparent_26%),radial-gradient(circle_at_bottom_left,rgba(11,78,162,0.18),transparent_34%)]" />
-          <div className="relative">
-            <div className="mb-4 flex flex-wrap items-center gap-3">
-              <Badge variant="blue" className="mb-0">
-                <Building2 className="h-3.5 w-3.5" />
-                {gatewayUser?.role === 'Blood Bank' ? 'Blood Bank Command Center' : 'Hospital Command Center'}
-              </Badge>
-              {gatewayUser?.verificationBadge && (
-                <Badge variant="success">
-                  <BadgeCheck className="h-3.5 w-3.5" />
-                  {gatewayUser.verificationBadge}
-                </Badge>
-              )}
-            </div>
-            <h1 className="text-3xl font-semibold text-white sm:text-4xl">Regional dispatch and facility-owned donor CRM</h1>
-            <p className="mt-4 max-w-2xl text-sm leading-7 text-slate-300">This command center creates Red Alerts directly over Socket.io, receives live donor coordinates after ZK-backed clearance, and stores every drive in a private facility ledger.</p>
-            <div className="mt-7 grid gap-4 sm:grid-cols-3">
-              {summaryItems.map((item) => (
-                <div key={item.label} className="rounded-[1.35rem] border border-white/10 bg-white/6 p-4">
-                  <p className="text-xs uppercase tracking-[0.18em] text-slate-400">{item.label}</p>
-                  <p className={`mt-2 text-lg font-semibold ${item.tone}`}>{item.value}</p>
-                </div>
-              ))}
-            </div>
+    <div className="space-y-6">
+      <Card>
+        <CardHeader>
+          <Badge variant="blue"><Building2 className="h-3.5 w-3.5" />Facility Command</Badge>
+          <CardTitle>Coordinate-based emergency broadcast</CardTitle>
+          <CardDescription>
+            Requests now use your live facility point and broadcast only to compatible donors within 5 km.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="grid gap-4 md:grid-cols-4">
+          <div className="rounded-[1rem] border border-white/10 bg-white/5 p-4">
+            <p className="text-xs uppercase tracking-[0.18em] text-slate-400">Facility</p>
+            <p className="mt-2 text-sm font-semibold text-white">{user?.name}</p>
           </div>
-
-          <div className="relative rounded-[1.7rem] border border-[#ff8f1f]/25 bg-[linear-gradient(180deg,rgba(255,143,31,0.16),rgba(255,143,31,0.05))] p-6">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-xs uppercase tracking-[0.26em] text-[#ffd19e]">AI Foresight</p>
-                <h2 className="mt-3 text-xl font-semibold text-white">Predicted dengue-driven O-ve spike</h2>
-              </div>
-              <div className="rounded-2xl bg-slate-950/25 p-3">
-                <BrainCircuit className="h-6 w-6 text-[#ffbf73]" />
-              </div>
-            </div>
-            <p className="mt-3 text-sm leading-6 text-slate-100">The command center prioritizes O-ve inventory staging and summons pre-cleared donors before the demand curve peaks.</p>
-            {gatewayUser?.facilityAddress && (
-              <div className="mt-4 rounded-2xl border border-white/10 bg-slate-950/25 p-4 text-sm text-slate-200">
-                Verified address: {gatewayUser.facilityAddress}
-              </div>
-            )}
-            {gatewayUser?.role === 'Blood Bank' && (
-              <div className={`mt-4 rounded-2xl border p-4 text-sm ${issueBloodEnabled ? 'border-emerald-400/25 bg-emerald-500/10 text-emerald-100' : 'border-amber-400/25 bg-amber-500/10 text-amber-100'}`}>
-                {issueBloodEnabled ? 'DCGI_Verified license detected. Issue Blood workflow is enabled.' : 'Issue Blood is locked until license_type is DCGI_Verified.'}
-              </div>
-            )}
+          <div className="rounded-[1rem] border border-white/10 bg-white/5 p-4">
+            <p className="text-xs uppercase tracking-[0.18em] text-slate-400">HFR ID</p>
+            <p className="mt-2 text-sm font-semibold text-white">{user?.hfrFacilityId || 'Pending'}</p>
+          </div>
+          <div className="rounded-[1rem] border border-white/10 bg-white/5 p-4">
+            <p className="text-xs uppercase tracking-[0.18em] text-slate-400">DCGI</p>
+            <p className="mt-2 text-sm font-semibold text-white">{user?.dcgiLicenseNumber || 'Not required'}</p>
+          </div>
+          <div className="rounded-[1rem] border border-white/10 bg-white/5 p-4">
+            <p className="text-xs uppercase tracking-[0.18em] text-slate-400">Private Ledger</p>
+            <p className="mt-2 text-sm font-semibold text-white">{ledger.entries?.length || 0} donors</p>
           </div>
         </CardContent>
       </Card>
 
-      {/* ── Donor Accepted Banner (full width, prominent) ──────────────────── */}
-      <AnimatePresence>
-        {showAcceptedBanner && acceptedEmergency && (
-          <DonorAcceptedBanner
-            data={acceptedEmergency}
-            onDismiss={() => setShowAcceptedBanner(false)}
-          />
-        )}
-      </AnimatePresence>
-
-      {/* ── Decline notification ───────────────────────────────────────────── */}
-      <AnimatePresence>
-        {declineMessage && (
-          <motion.div
-            initial={{ opacity: 0, y: -10 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0 }}
-            className="flex items-center gap-3 rounded-[1.2rem] border border-amber-400/30 bg-amber-500/10 px-5 py-4 text-sm text-amber-100"
-          >
-            <Siren className="h-4 w-4 flex-shrink-0 text-amber-300" />
-            {declineMessage}
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      {/* ── Charts row ─────────────────────────────────────────────────────── */}
-      <div className="grid gap-6 xl:grid-cols-[1.15fr_0.85fr]">
-        <Card>
+      {acceptedEmergency && (
+        <Card className="border-emerald-400/30 bg-[linear-gradient(180deg,rgba(5,150,105,0.22),rgba(15,23,42,0.95))]">
           <CardHeader>
-            <Badge variant="saffron">
-              <BrainCircuit className="h-3.5 w-3.5" />
-              Predictive Demand Dashboard
-            </Badge>
-            <CardTitle>O-ve demand expected to surge within the next 24 hours</CardTitle>
-            <CardDescription>Simulated outbreak intelligence pushes the command center into proactive donor mobilization.</CardDescription>
+            <Badge variant="success"><Navigation className="h-3.5 w-3.5" />Accepted</Badge>
+            <CardTitle>{acceptedEmergency.donorName} is responding</CardTitle>
+            <CardDescription>
+              ETA: {acceptedEmergency.etaMinutes} minutes. Blood Group: {acceptedEmergency.bloodGroup}.
+            </CardDescription>
           </CardHeader>
-          <CardContent>
-            <PredictiveDemandChart />
+          <CardContent className="grid gap-4 md:grid-cols-2">
+            <div className="rounded-[1rem] border border-white/10 bg-white/5 p-4 text-sm text-slate-200">
+              <p className="text-xs uppercase tracking-[0.18em] text-slate-400">Live Coordinates</p>
+              <p className="mt-2 font-mono">{acceptedEmergency.coordinates?.latitude ?? '�'}, {acceptedEmergency.coordinates?.longitude ?? '�'}</p>
+            </div>
+            <div className="rounded-[1rem] border border-white/10 bg-white/5 p-4 text-sm text-slate-200">
+              <p className="text-xs uppercase tracking-[0.18em] text-slate-400">Distance Snapshot</p>
+              <p className="mt-2">{acceptedEmergency.distanceKm || 'Live'} km from facility point</p>
+            </div>
           </CardContent>
         </Card>
+      )}
 
-        <Card>
-          <CardHeader>
-            <Badge variant="blue">
-              <ShieldCheck className="h-3.5 w-3.5" />
-              Direct Authorization
-            </Badge>
-            <CardTitle>Pre-Verified Donor Profile</CardTitle>
-            <CardDescription>Identity remains hidden. Only blood group and proof-backed clearance are visible to the facility.</CardDescription>
-          </CardHeader>
-          <CardContent>
-            {latestProof ? (
-              <motion.div layout className="space-y-4 rounded-[1.6rem] border border-emerald-400/28 bg-emerald-500/10 p-5">
-                <div className="flex items-start justify-between gap-4">
-                  <div>
-                    <p className="text-xs uppercase tracking-[0.18em] text-emerald-100/80">Name Hidden</p>
-                    <h3 className="mt-2 text-2xl font-semibold text-white">{latestProof.alias}</h3>
-                    <p className="mt-2 text-sm text-slate-200">{latestProof.destination} / {latestProof.hospitalWing || 'Regional Dispatch'}</p>
-                  </div>
-                  <ShieldCheck className="h-12 w-12 text-emerald-300" />
-                </div>
-                <div className="grid gap-3 sm:grid-cols-2">
-                  <div className="rounded-2xl border border-white/10 bg-slate-950/25 p-4">
-                    <p className="text-xs text-slate-400">Blood Group</p>
-                    <p className="mt-2 text-lg font-semibold text-white">{latestProof.bloodGroup}</p>
-                  </div>
-                  <div className="rounded-2xl border border-white/10 bg-slate-950/25 p-4">
-                    <p className="text-xs text-slate-400">ZKP Status</p>
-                    <p className="mt-2 text-sm font-semibold text-emerald-300">{latestProof.zkStatus}</p>
-                  </div>
-                </div>
-                <div className="rounded-2xl border border-white/10 bg-slate-950/25 p-4">
-                  <p className="text-xs text-slate-400">Proof Hash</p>
-                  <p className="mt-2 break-all font-mono text-xs text-[#8bc0ff]">{latestProof.proofHash}</p>
-                </div>
-                <Button variant="success" size="lg" className="w-full" onClick={() => handleSummon(latestProof)} disabled={activeSummon === latestProof.id || latestProof.summonStatus === 'dispatched'} id="btn-verify-summon">
-                  {activeSummon === latestProof.id ? <><Activity className="h-4 w-4 animate-spin" /> Dispatching to facility ops...</> : latestProof.summonStatus === 'dispatched' ? <><BadgeCheck className="h-4 w-4" /> Verify &amp; Summon Complete</> : <><BellRing className="h-4 w-4" /> Verify &amp; Summon</>}
-                </Button>
-              </motion.div>
-            ) : (
-              <div className="rounded-[1.6rem] border border-dashed border-white/12 bg-white/4 p-8 text-center">
-                <ShieldCheck className="mx-auto h-10 w-10 text-slate-500" />
-                <p className="mt-4 text-sm font-medium text-slate-200">Awaiting donor proof</p>
-                <p className="mt-2 text-sm text-slate-400">Generate a proof from the donor dashboard to populate this pre-verified profile.</p>
-              </div>
-            )}
-          </CardContent>
-        </Card>
-      </div>
-
-      {/* ── Broadcast + Live Tracking ──────────────────────────────────────── */}
       <div className="grid gap-6 lg:grid-cols-2">
         <Card>
           <CardHeader>
-            <Badge variant="blue">
-              <Siren className="h-3.5 w-3.5" />
-              Regional Broadcast
-            </Badge>
-            <CardTitle>Create a direct region-room Red Alert</CardTitle>
-            <CardDescription>Hospitals and blood banks now broadcast directly to every active donor in the same region.</CardDescription>
+            <Badge variant="saffron"><Siren className="h-3.5 w-3.5" />Realtime Matching</Badge>
+            <CardTitle>Create emergency request</CardTitle>
+            <CardDescription>
+              The server uses the active facility session coordinates to compute direct donor distance.
+            </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
-            <div className="grid gap-4 sm:grid-cols-2">
-              <select value={requestDraft.bloodGroup} onChange={(e) => setRequestDraft((prev) => ({ ...prev, bloodGroup: e.target.value }))} className="rounded-[1rem] border border-white/10 bg-white/6 px-4 py-3 text-white outline-none" id="select-blood-group-broadcast">
-                {['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-'].map((group) => (
-                  <option key={group} value={group} className="bg-slate-900">{group}</option>
-                ))}
+            <div className="grid gap-4 md:grid-cols-2">
+              <select value={requestDraft.bloodGroup} onChange={(e) => setRequestDraft((prev) => ({ ...prev, bloodGroup: e.target.value }))} className="rounded-[1rem] border border-white/10 bg-white/6 px-4 py-3 text-white outline-none">
+                {['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-'].map((group) => <option key={group} value={group} className="bg-slate-950">{group}</option>)}
               </select>
-              <select value={requestDraft.urgency} onChange={(e) => setRequestDraft((prev) => ({ ...prev, urgency: e.target.value }))} className="rounded-[1rem] border border-white/10 bg-white/6 px-4 py-3 text-white outline-none" id="select-urgency-broadcast">
-                {['Critical', 'High', 'Medium'].map((urgency) => (
-                  <option key={urgency} value={urgency} className="bg-slate-900">{urgency}</option>
-                ))}
+              <select value={requestDraft.urgency} onChange={(e) => setRequestDraft((prev) => ({ ...prev, urgency: e.target.value }))} className="rounded-[1rem] border border-white/10 bg-white/6 px-4 py-3 text-white outline-none">
+                {['Critical', 'High', 'Medium', 'Low'].map((urgency) => <option key={urgency} value={urgency} className="bg-slate-950">{urgency}</option>)}
               </select>
             </div>
-            <Button onClick={handleCreateRequest} className="w-full" disabled={requesting} id="btn-broadcast-alert">
-              {requesting ? <><Activity className="h-4 w-4 animate-spin" /> Broadcasting...</> : <><Siren className="h-4 w-4" /> Broadcast Regional Red Alert</>}
+            <Button onClick={handleCreateRequest} size="lg" disabled={requesting}>
+              {requesting ? <><Activity className="h-4 w-4 animate-spin" /> Broadcasting...</> : 'Broadcast Emergency'}
             </Button>
-            {requestResult && (
-              <div className="rounded-[1.4rem] border border-emerald-400/25 bg-emerald-500/10 p-4 text-sm text-emerald-100">
-                Matching engine prepared {requestResult.matches?.length || 0} region-qualified candidates for this request.
+            {requestResult?.meta && (
+              <div className="rounded-[1rem] border border-white/10 bg-white/5 p-4 text-sm text-slate-200">
+                Radius: {requestResult.meta.radiusKm} km. Notified donors: {requestResult.meta.notifiedDonorCount}.
               </div>
             )}
-            {statusMessage && (
-              <div className="rounded-[1.4rem] border border-amber-400/25 bg-amber-500/10 p-4 text-sm text-amber-100">{statusMessage}</div>
-            )}
-            <div className="rounded-[1.4rem] border border-white/10 bg-white/5 p-4 text-sm text-slate-300">
-              Socket room: <span className="font-semibold text-white">{gatewayUser?.currentRegion || 'south-zone'}</span>
-            </div>
+            {statusMessage && <div className="rounded-[1rem] border border-white/10 bg-white/5 p-4 text-sm text-slate-200">{statusMessage}</div>}
           </CardContent>
         </Card>
 
         <Card>
           <CardHeader>
-            <Badge variant="blue">
-              <MapPinned className="h-3.5 w-3.5" />
-              Live Donor Tracking
-            </Badge>
-            <CardTitle>Real-time donor coordinates and ETA</CardTitle>
-            <CardDescription>Live location arrives immediately after a donor clears the 90-day history and proof checks.</CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            {liveFeed.length > 0 ? liveFeed.map((item, index) => (
-              <div key={`${item.donorAlias}-${index}`} className="rounded-[1.4rem] border border-white/10 bg-white/5 p-4">
-                <p className="text-sm font-semibold text-white">{item.donorAlias} · {item.abhaStatus}</p>
-                <p className="mt-2 text-sm text-slate-300">{item.requestTitle}</p>
-                <p className="mt-2 text-xs text-slate-400">ETA {item.etaMinutes} min · {item.coordinates?.latitude}, {item.coordinates?.longitude}</p>
-              </div>
-            )) : (
-              <div className="rounded-[1.4rem] border border-dashed border-white/12 bg-white/4 p-6 text-sm text-slate-400">No live donor coordinates yet. Accept a request from the citizen dashboard to stream the feed here.</div>
-            )}
-          </CardContent>
-        </Card>
-      </div>
-
-      {/* ── Accepted Emergency: Donor Details + Live Map ───────────────────── */}
-      <AnimatePresence>
-        {acceptedEmergency && (
-          <motion.div
-            initial={{ opacity: 0, y: 16 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: 12 }}
-            className="grid gap-6 lg:grid-cols-[0.9fr_1.1fr]"
-          >
-            <Card>
-              <CardHeader>
-                <Badge variant="success">
-                  <CheckCircle2 className="h-3.5 w-3.5" />
-                  Emergency Accepted
-                </Badge>
-                <CardTitle>Donor {acceptedEmergency.donorName} is on the way</CardTitle>
-                <CardDescription>ETA: <span className="font-bold text-emerald-300">{etaDisplay || `${acceptedEmergency.etaMinutes} mins`}</span> · Blood Group: {acceptedEmergency.bloodGroup}</CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-3 text-sm text-slate-200">
-                <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
-                  <p className="text-xs uppercase tracking-[0.18em] text-slate-400">Live Coordinates</p>
-                  <p className="mt-2 font-mono">{acceptedEmergency.coordinates?.latitude?.toFixed(5) ?? '—'}, {acceptedEmergency.coordinates?.longitude?.toFixed(5) ?? '—'}</p>
-                </div>
-                <div className="rounded-2xl border border-emerald-400/25 bg-emerald-500/10 p-4">
-                  <p className="text-xs uppercase tracking-[0.18em] text-emerald-300/80">Status</p>
-                  <p className="mt-2 font-semibold text-white">Donor {acceptedEmergency.donorName} accepted the emergency request and is being tracked live.</p>
-                </div>
-              </CardContent>
-            </Card>
-
-            <Card>
-              <CardHeader>
-                <Badge variant="blue">
-                  <MapPinned className="h-3.5 w-3.5" />
-                  Live Map
-                </Badge>
-                <CardTitle>Moving donor marker</CardTitle>
-                <CardDescription>Live donor movement rendered into a Google Maps embed. Updates on every socket coordinate push.</CardDescription>
-              </CardHeader>
-              <CardContent>
-                <div className="overflow-hidden rounded-[1.5rem] border border-white/10 bg-slate-950/25">
-                  <iframe
-                    key={`map-${acceptedEmergency.coordinates?.latitude}-${acceptedEmergency.coordinates?.longitude}`}
-                    title="Donor live map"
-                    src={`https://maps.google.com/maps?q=${acceptedEmergency.coordinates?.latitude || 0},${acceptedEmergency.coordinates?.longitude || 0}&z=15&output=embed`}
-                    className="h-[320px] w-full"
-                    loading="lazy"
-                  />
-                </div>
-              </CardContent>
-            </Card>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      {/* ── CRM + Dispatch ─────────────────────────────────────────────────── */}
-      <div className="grid gap-6 lg:grid-cols-[0.95fr_1.05fr]">
-        <Card>
-          <CardHeader>
-            <Badge variant="blue">
-              <Users className="h-3.5 w-3.5" />
-              Facility CRM
-            </Badge>
-            <CardTitle>Drive intake and private donor ledger</CardTitle>
-            <CardDescription>Facilities can fetch mock ABHA profiles and add them to a ledger owned only by that facility.</CardDescription>
+            <Badge variant="blue"><UserRoundPlus className="h-3.5 w-3.5" />Private CRM</Badge>
+            <CardTitle>Donation drive intake</CardTitle>
+            <CardDescription>
+              Enter an ABHA number or address to fetch the donor profile and save it to your facility-owned ledger.
+            </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="flex gap-3">
-              <input value={lookupAbha} onChange={(e) => setLookupAbha(e.target.value)} placeholder="Enter ABHA ID" className="flex-1 rounded-[1rem] border border-white/10 bg-white/6 px-4 py-3 text-white placeholder:text-slate-400 outline-none" id="input-abha-lookup" />
-              <Button onClick={handleLookup} disabled={lookupLoading} id="btn-abha-lookup">
-                {lookupLoading ? <Activity className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
-                Lookup
-              </Button>
+              <input value={lookupValue} onChange={(e) => setLookupValue(e.target.value)} placeholder="ABHA number or address" className="flex-1 rounded-[1rem] border border-white/10 bg-white/6 px-4 py-3 text-white placeholder:text-slate-400 outline-none" />
+              <Button variant="secondary" onClick={handleLookup}><Search className="h-4 w-4" /> Lookup</Button>
             </div>
-
             {lookupProfile && (
-              <div className="rounded-[1.4rem] border border-white/10 bg-white/5 p-4">
-                <p className="text-sm font-semibold text-white">{lookupProfile.name} · {lookupProfile.abhaAddress}</p>
-                <p className="mt-2 text-sm text-slate-300">{lookupProfile.bloodGroup || 'Blood group pending'} · {lookupProfile.verificationTier}</p>
-                <p className="mt-2 text-xs text-slate-400">Verification source: {lookupProfile.verificationSourceId || 'Not supplied'} · Region: {lookupProfile.currentRegion}</p>
-                <Button onClick={handleLedgerIntake} className="mt-4 w-full" id="btn-add-to-ledger">
-                  <Droplets className="h-4 w-4" />
-                  Add to Facility Ledger
-                </Button>
+              <div className="rounded-[1rem] border border-white/10 bg-white/5 p-4 text-sm text-slate-200">
+                <p className="font-semibold text-white">{lookupProfile.name}</p>
+                <p className="mt-1">{lookupProfile.abhaNumber} � {lookupProfile.abhaAddress}</p>
+                <p className="mt-1">Blood Group: {lookupProfile.bloodGroup || 'Pending'} � {lookupProfile.verificationTier}</p>
+                <Button className="mt-4" onClick={handleLedgerIntake}>Add to Private Ledger</Button>
               </div>
             )}
-
-            <div className="rounded-[1.4rem] border border-white/10 bg-white/5 p-4">
+            <div className="rounded-[1rem] border border-white/10 bg-white/5 p-4">
               <div className="mb-4 flex items-center justify-between gap-3">
-                <div>
-                  <p className="text-sm font-semibold text-white">Private Ledger</p>
-                  <p className="mt-1 text-xs text-slate-400">{ledger.entries?.length || 0} donors added during this drive.</p>
-                </div>
-                <Button variant="secondary" onClick={handleExportLedger} className="bg-white/10 text-white hover:bg-white/15" id="btn-export-ledger">
-                  <Download className="h-4 w-4" />
-                  Export
-                </Button>
+                <p className="text-sm font-semibold text-white">Recent ledger entries</p>
+                <Button variant="secondary" onClick={handleExport}><Download className="h-4 w-4" /> Export</Button>
               </div>
               <div className="space-y-3">
-                {(ledger.entries?.length || 0) > 0 ? ledger.entries.slice(0, 5).map((entry) => (
-                  <div key={entry._id || entry.abhaAddress} className="rounded-[1rem] border border-white/10 bg-slate-950/25 p-3">
-                    <p className="text-sm font-semibold text-white">{entry.donorName}</p>
-                    <p className="mt-1 text-xs text-slate-300">{entry.abhaAddress} · {entry.bloodGroup || 'Pending group'}</p>
-                    <p className="mt-1 text-xs text-slate-400">{entry.verificationTier}</p>
+                {(ledger.entries || []).slice(0, 5).map((entry) => (
+                  <div key={entry._id || entry.abhaAddress} className="rounded-[0.9rem] border border-white/10 bg-slate-950/30 p-3 text-sm text-slate-200">
+                    <p className="font-semibold text-white">{entry.donorName}</p>
+                    <p className="mt-1">{entry.abhaAddress}</p>
+                    <p className="mt-1 inline-flex items-center gap-2"><MapPin className="h-3.5 w-3.5 text-[#8bc0ff]" /> {entry.bloodGroup || 'Pending group'} � {entry.verificationTier}</p>
                   </div>
-                )) : (
-                  <div className="rounded-[1rem] border border-dashed border-white/12 bg-white/4 p-4 text-sm text-slate-400">No donors have been added to this facility ledger yet.</div>
-                )}
-              </div>
-            </div>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <Badge variant="saffron">
-              <ArrowUpRight className="h-3.5 w-3.5" />
-              Dispatch Layer
-            </Badge>
-            <CardTitle>Regional dispatch and summon audit</CardTitle>
-            <CardDescription>Summon actions are logged locally while the live donor ETA stream keeps updating.</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <div className="rounded-[1.6rem] border border-white/10 bg-slate-950/30 p-5">
-              <div className="flex items-center justify-between gap-4 border-b border-white/10 pb-4">
-                <div>
-                  <p className="text-xs uppercase tracking-[0.18em] text-slate-400">Destination</p>
-                  <p className="mt-2 text-base font-semibold text-white">{latestProof?.destination || gatewayUser?.name || 'Regional Facility'}</p>
-                </div>
-                <ArrowUpRight className="h-5 w-5 text-[#8bc0ff]" />
-              </div>
-
-              <div className="space-y-4 pt-4 text-sm text-slate-200">
-                <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
-                  <p className="text-xs uppercase tracking-[0.18em] text-slate-400">Latest Live ETA</p>
-                  <p className="mt-2 leading-6">{latestLiveSignal ? `${latestLiveSignal.donorAlias} arriving in ${latestLiveSignal.etaMinutes} minutes for ${latestLiveSignal.requestTitle}.` : 'Awaiting a donor acceptance event from the regional room.'}</p>
-                </div>
-                <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
-                  <p className="text-xs uppercase tracking-[0.18em] text-slate-400">Route Link</p>
-                  <p className="mt-2 break-all font-mono text-xs text-[#8bc0ff]">{latestProof?.mapLink || 'https://maps.google.com/?q=Apex+City+Hospital'}</p>
-                </div>
-                <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
-                  <p className="text-xs uppercase tracking-[0.18em] text-slate-400">Summon Audit</p>
-                  {(summonEvents.length > 0) ? (
-                    <div className="mt-2 space-y-2">
-                      {summonEvents.slice(0, 3).map((event) => (
-                        <p key={event.id} className="text-sm text-slate-200">{event.message}</p>
-                      ))}
-                    </div>
-                  ) : (
-                    <p className="mt-2 text-sm font-semibold text-emerald-300">ZKP clearance valid, donor identity withheld, summon ready.</p>
-                  )}
-                </div>
+                ))}
+                {!(ledger.entries || []).length && <div className="text-sm text-slate-400">No donors added yet.</div>}
               </div>
             </div>
           </CardContent>
         </Card>
       </div>
+
+      <Card>
+        <CardHeader>
+          <Badge variant="subtle"><BadgeCheck className="h-3.5 w-3.5" />Registry Flow</Badge>
+          <CardTitle>Matching data sources</CardTitle>
+        </CardHeader>
+        <CardContent className="grid gap-3 text-sm text-slate-300 md:grid-cols-3">
+          <div className="rounded-[1rem] border border-white/10 bg-white/5 p-4">Blood group comes from the internal mock ABDM sandbox registry.</div>
+          <div className="rounded-[1rem] border border-white/10 bg-white/5 p-4">Facility and donor positions come from saved LifeLink MongoDB coordinates plus the active socket session.</div>
+          <div className="rounded-[1rem] border border-white/10 bg-white/5 p-4">Only compatible donors inside 5 km receive the `INCOMING_EMERGENCY` broadcast.</div>
+        </CardContent>
+      </Card>
     </div>
   );
 }

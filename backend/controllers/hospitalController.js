@@ -52,7 +52,13 @@ const updateInternalDonor = async (req, res) => {
 
 const fetchSandboxProfile = async (req, res) => {
   try {
-    const profile = await MockSandboxRegistry.findOne({ abhaAddress: req.params.abhaAddress.toLowerCase() });
+    const identifier = String(req.params.abhaAddress || '').trim().toLowerCase();
+    const profile = await MockSandboxRegistry.findOne({
+      $or: [
+        { abhaAddress: identifier },
+        { abhaNumber: req.params.abhaAddress },
+      ],
+    });
     if (!profile) return res.status(404).json({ message: 'ABHA profile not found in mock sandbox registry.' });
     res.json(profile);
   } catch (err) {

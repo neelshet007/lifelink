@@ -31,7 +31,6 @@ const serializeUser = (user) => ({
   facilityType: user.facilityType || '',
   licenseStatus: user.licenseStatus || '',
   license_type: user.license_type || '',
-  currentRegion: user.currentRegion || 'south-zone',
   verificationTier: user.verificationTier || 'Facility-Verified',
   verificationSourceId: user.verificationSourceId || '',
   location: user.location || { type: 'Point', coordinates: [0, 0] },
@@ -62,7 +61,12 @@ const getExistingQuery = (identityType, identifier) => {
 
 const resolveRegistryRecord = async (identityType, identifier) => {
   if (identityType === 'ABHA') {
-    const sandboxRecord = await MockSandboxRegistry.findOne({ abhaAddress: identifier.toLowerCase() });
+    const sandboxRecord = await MockSandboxRegistry.findOne({
+      $or: [
+        { abhaAddress: identifier.toLowerCase() },
+        { abhaNumber: identifier },
+      ],
+    });
     if (sandboxRecord) {
       return {
         identityType,
@@ -76,7 +80,6 @@ const resolveRegistryRecord = async (identityType, identifier) => {
           bloodGroup: sandboxRecord.bloodGroup,
           contact: '',
           coordinates: [0, 0],
-          currentRegion: sandboxRecord.currentRegion,
         },
         fhirPatient: sandboxRecord.fhirBundle.entry?.find((entry) => entry.resource?.resourceType === 'Patient')?.resource,
         displayName: sandboxRecord.name,
@@ -118,7 +121,6 @@ const buildProvisionedUserData = async (record, identifier) => {
       verificationBadge: 'ABDM Verified Citizen',
       verificationSource: 'ABDM Sandbox',
       verificationTier: citizen.bloodGroup ? 'Facility-Verified' : 'Unverified (Emergency Only)',
-      currentRegion: citizen.currentRegion || 'south-zone',
       lastAbdmSyncAt: new Date(),
       location: { type: 'Point', coordinates: citizen.coordinates || [0, 0] },
     };
@@ -143,7 +145,6 @@ const buildProvisionedUserData = async (record, identifier) => {
     facilityType: facility.facilityType,
     licenseStatus: facility.licenseStatus,
     ...(facility.license_type ? { license_type: facility.license_type } : {}),
-    currentRegion: facility.currentRegion || 'west-zone',
     lastAbdmSyncAt: new Date(),
     location: { type: 'Point', coordinates: facility.coordinates },
   };
@@ -179,7 +180,6 @@ const registerUser = async (req, res) => {
       role,
       identityType: 'LOCAL',
       donorFeaturesEnabled: role !== 'User' || Boolean(bloodGroup),
-      currentRegion: 'south-zone',
       verificationTier: 'Facility-Verified',
       ...(role === 'User' ? { bloodGroup } : {}),
       location: { type: 'Point', coordinates: [parseFloat(longitude) || 0, parseFloat(latitude) || 0] },
@@ -261,7 +261,9 @@ const completeGatewayLogin = async (req, res) => {
 
 const registerMockAbha = async (req, res) => {
   try {
-    const { name, aadhaar, email, dob, gender, currentRegion = 'south-zone' } = req.body;
+    const { name, aadhaar, email } = req.body;
+    const dob = req.body.dob || '1998-01-01';
+    const gender = req.body.gender || 'unknown';
     const firstToken = name.toLowerCase().replace(/[^a-z]/g, '').slice(0, 12) || 'user';
     let randomSuffix = String(Math.floor(1000 + Math.random() * 9000));
     let abhaAddress = `${firstToken}.${randomSuffix}@abdm`;
@@ -302,7 +304,6 @@ const registerMockAbha = async (req, res) => {
       email,
       gender,
       dob,
-      currentRegion,
       fhirBundle: bundle,
     });
 
@@ -317,7 +318,6 @@ const registerMockAbha = async (req, res) => {
         bloodGroup: '',
         contact: '',
         coordinates: [0, 0],
-        currentRegion,
       },
     }, abhaAddress);
     userData.email = email.toLowerCase();
@@ -362,11 +362,22 @@ const updateCurrentLocation = async (req, res) => {
 
 const registerFacilityOnboarding = async (req, res) => {
   try {
-    const { facilityName, category, governmentRegNo, administratorAadhaar, email } = req.body;
+    const {
+      facilityName,
+      category,
+      governmentRegNo,
+      administratorAadhaar,
+      email,
+      contact = '',
+      address = 'Mumbai, Maharashtra',
+      latitude,
+      longitude,
+    } = req.body;
     const cityCode = 'MUM';
     let facilityAbdmId = '';
     let hfrFacilityId = '';
     let dcgiLicenseNumber = '';
+    let hfrCertificateNumber = '';
 
     do {
       facilityAbdmId = `FAC-${cityCode}-${Math.floor(1000 + Math.random() * 9000)}`;
@@ -382,6 +393,13 @@ const registerFacilityOnboarding = async (req, res) => {
       } while (await MockFacilitiesRegistry.findOne({ dcgiLicenseNumber }));
     }
 
+    do {
+      hfrCertificateNumber = `HFR-CERT-2026-${Math.floor(1000 + Math.random() * 9000)}`;
+    } while (await MockFacilitiesRegistry.findOne({ hfrCertificateNumber }));
+
+    const lng = Number.isFinite(Number(longitude)) ? Number(longitude) : 72.8777;
+    const lat = Number.isFinite(Number(latitude)) ? Number(latitude) : 19.076;
+
     const registryRecord = await MockFacilitiesRegistry.create({
       facilityAbdmId,
       hfrFacilityId,
@@ -391,13 +409,16 @@ const registerFacilityOnboarding = async (req, res) => {
       email,
       governmentRegNo,
       adminAadhaar: administratorAadhaar,
-      address: 'Mumbai, Maharashtra',
-      coordinates: [72.8777, 19.076],
+      contact,
+      address,
+      coordinates: [lng, lat],
+      hfrCertificateNumber,
+      hfrCertificateUrl: `mock://registry/${hfrCertificateNumber}`,
+      ...(dcgiLicenseNumber ? { mockDcgiLicenseUrl: `mock://registry/${dcgiLicenseNumber}` } : {}),
       licenseStatus: 'Active',
       verificationBadge: 'Verified by NHA',
       facilityType: category === 'Hospital' ? 'Registered Hospital' : 'Registered Blood Bank',
       license_type: category === 'Blood Bank' ? 'DCGI_Verified' : '',
-      currentRegion: 'west-zone',
     });
 
     const userData = await buildProvisionedUserData({
@@ -408,14 +429,13 @@ const registerFacilityOnboarding = async (req, res) => {
         role: category,
         name: facilityName,
         email,
-        contact: '',
+        contact,
         address: registryRecord.address,
         coordinates: registryRecord.coordinates,
         licenseStatus: registryRecord.licenseStatus,
         verificationBadge: registryRecord.verificationBadge,
         facilityType: registryRecord.facilityType,
         license_type: registryRecord.license_type,
-        currentRegion: registryRecord.currentRegion,
       },
     }, category === 'Hospital' ? hfrFacilityId : dcgiLicenseNumber);
 
@@ -427,6 +447,7 @@ const registerFacilityOnboarding = async (req, res) => {
       credentials: {
         facilityAbdmId,
         hfrFacilityId,
+        hfrCertificateNumber,
         ...(dcgiLicenseNumber ? { dcgiLicenseNumber } : {}),
       },
       registryId: registryRecord.id,

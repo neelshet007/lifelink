@@ -12,11 +12,13 @@ const mockFacilitiesRegistrySchema = new mongoose.Schema({
   contact: { type: String, default: '' },
   address: { type: String, default: 'Mumbai, Maharashtra' },
   coordinates: { type: [Number], default: [72.8777, 19.076] },
+  hfrCertificateNumber: { type: String, required: true, trim: true },
+  hfrCertificateUrl: { type: String, default: '' },
+  mockDcgiLicenseUrl: { type: String, default: '' },
   licenseStatus: { type: String, default: 'Active' },
   verificationBadge: { type: String, default: 'Verified by NHA' },
   facilityType: { type: String, default: 'Registered Facility' },
   license_type: { type: String, default: '' },
-  currentRegion: { type: String, default: 'west-zone' },
 }, { timestamps: true, collection: 'mock_facilities_registry' });
 
 module.exports = mongoose.model('MockFacilitiesRegistry', mockFacilitiesRegistrySchema);
