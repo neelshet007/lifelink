@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState, useSyncExternalStore } from 'react';
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import axios from 'axios';
 import { Activity, BadgeCheck, Building2, Download, MapPin, Navigation, Search, Siren, UserRoundPlus } from 'lucide-react';
 import { Badge } from '../../../components/ui/badge';
@@ -18,6 +18,56 @@ function formatCoord(value) {
   return Number.isFinite(Number(value)) ? Number(value).toFixed(5) : '--';
 }
 
+// ── ETA countdown ─────────────────────────────────────────────────────────────
+// Decrements the displayed ETA every 60 s after the donor accepts, so the
+// hospital sees a live countdown without a page refresh.
+function useEtaCountdown(etaMinutes, active) {
+  const [eta, setEta] = useState(etaMinutes);
+  const timerRef = useRef(null);
+
+  useEffect(() => {
+    setEta(etaMinutes);
+  }, [etaMinutes]);
+
+  useEffect(() => {
+    if (!active || !Number.isFinite(eta) || eta <= 0) return;
+    timerRef.current = setInterval(() => {
+      setEta((prev) => {
+        const next = prev - 1;
+        if (next <= 0) {
+          clearInterval(timerRef.current);
+          return 0;
+        }
+        return next;
+      });
+    }, 60_000);
+
+    return () => clearInterval(timerRef.current);
+  }, [active, eta]);
+
+  return eta;
+}
+
+// ── Donor map marker position ──────────────────────────────────────────────────
+// Converts real-world lat/lng to an approximate CSS percentage offset within
+// the 100×100 viewBox so the donor dot moves on the map panel.
+// We clamp to [10%, 90%] so the marker stays inside the panel.
+function coordsToMapOffset(donorCoords, hospitalCoords) {
+  if (!donorCoords?.latitude || !hospitalCoords?.latitude) {
+    return { left: '78%', top: '28%' }; // default static position
+  }
+
+  const latDelta = donorCoords.latitude - hospitalCoords.latitude;
+  const lngDelta = donorCoords.longitude - hospitalCoords.longitude;
+
+  // 0.05 degree ≈ ~5 km; scale so 5 km maps to ~40% of the panel
+  const scaleFactor = 40 / 0.05;
+  const leftPct = Math.min(90, Math.max(10, 50 + lngDelta * scaleFactor));
+  const topPct = Math.min(90, Math.max(10, 50 - latDelta * scaleFactor)); // y-axis is inverted
+
+  return { left: `${leftPct.toFixed(1)}%`, top: `${topPct.toFixed(1)}%` };
+}
+
 export default function HospitalDashboard() {
   const { connectionStatus } = useSyncExternalStore(subscribe, getSocketStoreState, getSocketStoreState);
   const user = useMemo(() => getStoredUser(), []);
@@ -31,38 +81,57 @@ export default function HospitalDashboard() {
   const [ledger, setLedger] = useState({ entries: [] });
   const [statusMessage, setStatusMessage] = useState('');
 
+  const etaDisplay = useEtaCountdown(acceptedEmergency?.etaMinutes, Boolean(acceptedEmergency));
+  const markerPos = coordsToMapOffset(
+    acceptedEmergency?.coordinates,
+    requestResult?.meta?.hospitalCoords
+  );
+
+  // ── Real-time socket listeners ────────────────────────────────────────────────
   useEffect(() => {
     const socket = getRealtimeSocket();
 
     const onAccepted = (payload) => {
       setAcceptedEmergency({ ...payload, status: 'In Progress' });
-      setStatusMessage(`Hero ${payload.donorName} is on the way! ETA ${payload.etaMinutes} mins.`);
-      setRequestResult((current) => current && String(current.request?._id || current.requestId) === String(payload.requestId)
-        ? {
-            ...current,
-            request: current.request ? { ...current.request, status: 'Accepted' } : current.request,
-          }
-        : current);
+      setStatusMessage(`🟢 Donor Found: ${payload.donorName} is ${payload.distanceKm ?? '?'} km away · ETA ${payload.etaMinutes} mins`);
+      setRequestResult((current) =>
+        current && String(current.request?._id || current.requestId) === String(payload.requestId)
+          ? {
+              ...current,
+              request: current.request ? { ...current.request, status: 'Accepted' } : current.request,
+            }
+          : current
+      );
     };
 
     const onDeclined = (payload) => {
-      setStatusMessage(`Donor ${payload.donorName} declined the emergency.`);
+      setStatusMessage(`⚠️ Donor ${payload.donorName} declined. Waiting for another donor...`);
+    };
+
+    // DONOR_RESPONSE_RECEIVED: combined event that carries a `status` field
+    // ('accepted' | 'declined'). Routes to the appropriate handler above.
+    const onDonorResponse = (payload) => {
+      if (payload.status === 'accepted') onAccepted(payload);
+      else onDeclined(payload);
     };
 
     const onLocation = (payload) => {
-      setAcceptedEmergency((current) => current && String(current.requestId) === String(payload.requestId)
-        ? {
-            ...current,
-            ...payload,
-            coordinates: payload.coordinates || current.coordinates,
-            distanceKm: payload.distanceKm ?? current.distanceKm,
-            etaMinutes: payload.etaMinutes ?? current.etaMinutes,
-          }
-        : current);
+      setAcceptedEmergency((current) =>
+        current && String(current.requestId) === String(payload.requestId)
+          ? {
+              ...current,
+              ...payload,
+              coordinates: payload.coordinates || current.coordinates,
+              distanceKm: payload.distanceKm ?? current.distanceKm,
+              etaMinutes: payload.etaMinutes ?? current.etaMinutes,
+            }
+          : current
+      );
     };
 
     socket.on('DONOR_ACCEPTED', onAccepted);
     socket.on('DONOR_DECLINED', onDeclined);
+    socket.on('DONOR_RESPONSE_RECEIVED', onDonorResponse); // new combined event
     socket.on('LOCATION_UPDATE', onLocation);
     socket.on('EMERGENCY_ACCEPTED', onAccepted);
     socket.on('EMERGENCY_DECLINED', onDeclined);
@@ -71,6 +140,7 @@ export default function HospitalDashboard() {
     return () => {
       socket.off('DONOR_ACCEPTED', onAccepted);
       socket.off('DONOR_DECLINED', onDeclined);
+      socket.off('DONOR_RESPONSE_RECEIVED', onDonorResponse);
       socket.off('LOCATION_UPDATE', onLocation);
       socket.off('EMERGENCY_ACCEPTED', onAccepted);
       socket.off('EMERGENCY_DECLINED', onDeclined);
@@ -80,9 +150,10 @@ export default function HospitalDashboard() {
 
   useEffect(() => {
     if (!token) return;
-    axios.get(`${API_URL}/api/hospital/ledger`, {
-      headers: { Authorization: `Bearer ${token}` },
-    }).then((res) => setLedger(res.data || { entries: [] })).catch(() => setLedger({ entries: [] }));
+    axios
+      .get(`${API_URL}/api/hospital/ledger`, { headers: { Authorization: `Bearer ${token}` } })
+      .then((res) => setLedger(res.data || { entries: [] }))
+      .catch(() => setLedger({ entries: [] }));
   }, [token]);
 
   const handleCreateRequest = async () => {
@@ -95,7 +166,9 @@ export default function HospitalDashboard() {
         headers: { Authorization: `Bearer ${token}` },
       });
       setRequestResult(res.data);
-      setStatusMessage(`Realtime broadcast sent. ${res.data.meta?.notifiedDonorCount || 0} verified donors received the emergency within 5 km.`);
+      setStatusMessage(
+        `⏳ Waiting for donors... ${res.data.meta?.notifiedDonorCount || 0} verified donors notified within 5 km.`
+      );
     } catch (error) {
       setStatusMessage(error.response?.data?.message || 'Unable to create realtime emergency.');
     } finally {
@@ -120,11 +193,11 @@ export default function HospitalDashboard() {
   const handleLedgerIntake = async () => {
     if (!token || !lookupProfile) return;
     try {
-      const res = await axios.post(`${API_URL}/api/hospital/ledger/intake`, {
-        abhaAddress: lookupProfile.abhaAddress,
-      }, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const res = await axios.post(
+        `${API_URL}/api/hospital/ledger/intake`,
+        { abhaAddress: lookupProfile.abhaAddress },
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
       setLedger(res.data);
       setStatusMessage('Donor added to the facility private ledger.');
     } catch (error) {
@@ -138,7 +211,6 @@ export default function HospitalDashboard() {
       headers: { Authorization: `Bearer ${token}` },
       responseType: 'blob',
     });
-
     const blob = new Blob([res.data], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
@@ -152,6 +224,7 @@ export default function HospitalDashboard() {
 
   return (
     <div className="space-y-6">
+      {/* ── Facility stats ──────────────────────────────────────────────────── */}
       <Card>
         <CardHeader>
           <Badge variant="blue"><Building2 className="h-3.5 w-3.5" />Facility Command</Badge>
@@ -179,18 +252,21 @@ export default function HospitalDashboard() {
           </div>
           <div className="rounded-[1rem] border border-white/10 bg-white/5 p-4">
             <p className="text-xs uppercase tracking-[0.18em] text-slate-400">Socket Status</p>
-            <p className="mt-2 text-sm font-semibold text-white">{connectionStatus === 'online' ? 'System Online' : connectionStatus === 'connecting' ? 'Connecting' : 'System Offline'}</p>
+            <p className="mt-2 text-sm font-semibold text-white">
+              {connectionStatus === 'online' ? 'System Online' : connectionStatus === 'connecting' ? 'Connecting' : 'System Offline'}
+            </p>
           </div>
         </CardContent>
       </Card>
 
+      {/* ── Waiting spinner: shows while pending, disappears on accept ──────── */}
       {requestResult?.request && !acceptedEmergency && (
         <Card className="border-amber-400/25 bg-[linear-gradient(180deg,rgba(146,64,14,0.20),rgba(15,23,42,0.95))]">
           <CardHeader>
-            <Badge variant="saffron"><Siren className="h-3.5 w-3.5" />Pending</Badge>
+            <Badge variant="saffron"><Siren className="h-3.5 w-3.5 animate-pulse" />Waiting for Donors</Badge>
             <CardTitle>Emergency request is live</CardTitle>
             <CardDescription>
-              Waiting for donor action. {requestResult.meta?.notifiedDonorCount || 0} compatible donors were notified within 5 km.
+              {statusMessage || `Scanning for compatible donors within 5 km...`}
             </CardDescription>
           </CardHeader>
           <CardContent className="grid gap-4 md:grid-cols-3">
@@ -203,51 +279,70 @@ export default function HospitalDashboard() {
               <p className="mt-2 font-semibold text-white">{requestResult.request.urgency}</p>
             </div>
             <div className="rounded-[1rem] border border-white/10 bg-white/5 p-4 text-sm text-slate-200">
-              <p className="text-xs uppercase tracking-[0.18em] text-slate-400">Radius</p>
-              <p className="mt-2 font-semibold text-white">{requestResult.meta?.radiusKm || 5} km</p>
+              <p className="text-xs uppercase tracking-[0.18em] text-slate-400">Donors Notified</p>
+              <p className="mt-2 font-semibold text-white">{requestResult.meta?.notifiedDonorCount || 0} within {requestResult.meta?.radiusKm || 5} km</p>
             </div>
           </CardContent>
         </Card>
       )}
 
+      {/* ── Donor Found: live tracking panel ────────────────────────────────── */}
       {acceptedEmergency && (
         <Card className="border-emerald-400/30 bg-[linear-gradient(180deg,rgba(5,150,105,0.22),rgba(15,23,42,0.95))]">
           <CardHeader>
-            <Badge variant="success"><Navigation className="h-3.5 w-3.5" />In Progress</Badge>
-            <CardTitle>Hero {acceptedEmergency.donorName} is on the way!</CardTitle>
+            <Badge variant="success"><Navigation className="h-3.5 w-3.5" />Donor Found — In Progress</Badge>
+            <CardTitle>
+              Donor Found: {acceptedEmergency.donorName} is {acceptedEmergency.distanceKm ?? '?'} km away
+            </CardTitle>
             <CardDescription>
-              ETA: {acceptedEmergency.etaMinutes} mins. Blood Group: {acceptedEmergency.bloodGroup}. Live tracking is active.
+              Blood Group: {acceptedEmergency.bloodGroup} · ETA: {etaDisplay} min{etaDisplay !== 1 ? 's' : ''} · Live tracking active
             </CardDescription>
           </CardHeader>
           <CardContent className="grid gap-4 lg:grid-cols-[1.15fr,0.85fr]">
             <div className="space-y-4">
               <div className="grid gap-4 md:grid-cols-2">
                 <div className="rounded-[1rem] border border-white/10 bg-white/5 p-4 text-sm text-slate-200">
-                  <p className="text-xs uppercase tracking-[0.18em] text-slate-400">Live Coordinates</p>
-                  <p className="mt-2 font-mono text-white">{formatCoord(acceptedEmergency.coordinates?.latitude)}, {formatCoord(acceptedEmergency.coordinates?.longitude)}</p>
+                  <p className="text-xs uppercase tracking-[0.18em] text-slate-400">Donor Name</p>
+                  <p className="mt-2 font-semibold text-white">{acceptedEmergency.donorName}</p>
                 </div>
                 <div className="rounded-[1rem] border border-white/10 bg-white/5 p-4 text-sm text-slate-200">
                   <p className="text-xs uppercase tracking-[0.18em] text-slate-400">Distance Snapshot</p>
-                  <p className="mt-2 text-white">{acceptedEmergency.distanceKm || 'Live'} km from facility point</p>
+                  <p className="mt-2 text-white">{acceptedEmergency.distanceKm ?? 'Live'} km from facility</p>
                 </div>
               </div>
+              <div className="rounded-[1rem] border border-white/10 bg-white/5 p-4 text-sm text-slate-200">
+                <p className="text-xs uppercase tracking-[0.18em] text-slate-400">Live Coordinates</p>
+                <p className="mt-2 font-mono text-white">
+                  {formatCoord(acceptedEmergency.coordinates?.latitude)}, {formatCoord(acceptedEmergency.coordinates?.longitude)}
+                </p>
+              </div>
               <div className="rounded-[1rem] border border-emerald-400/20 bg-emerald-500/10 p-4 text-sm text-emerald-50">
-                {statusMessage || `Hero ${acceptedEmergency.donorName} is on the way! (ETA: ${acceptedEmergency.etaMinutes} mins)`}
+                {statusMessage}
               </div>
             </div>
+
+            {/* ── Live Map panel with reactive donor marker ────────────────── */}
             <div className="rounded-[1.4rem] border border-white/10 bg-[radial-gradient(circle_at_top,rgba(14,165,233,0.14),rgba(15,23,42,0.85))] p-4">
               <p className="text-xs uppercase tracking-[0.18em] text-slate-400">Live Map</p>
-              <p className="mt-2 text-sm font-semibold text-white">Realtime donor marker</p>
+              <p className="mt-2 text-sm font-semibold text-white">Updating every 5 s</p>
               <div className="relative mt-4 h-48 overflow-hidden rounded-[1.2rem] border border-white/10 bg-[linear-gradient(180deg,rgba(15,23,42,0.45),rgba(2,6,23,0.9))]">
                 <div className="absolute inset-0 bg-[linear-gradient(90deg,rgba(148,163,184,0.08)_1px,transparent_1px),linear-gradient(rgba(148,163,184,0.08)_1px,transparent_1px)] bg-[size:32px_32px]" />
+
+                {/* Facility marker — static at centre-bottom */}
                 <div className="absolute left-[20%] top-[66%] flex -translate-x-1/2 -translate-y-1/2 items-center gap-2 rounded-full bg-[#ff8f1f] px-3 py-2 text-xs font-semibold text-slate-950 shadow-[0_12px_30px_rgba(255,143,31,0.32)]">
                   <Building2 className="h-3.5 w-3.5" />
                   Facility
                 </div>
-                <div className="absolute right-[18%] top-[30%] flex translate-x-1/2 -translate-y-1/2 items-center gap-2 rounded-full bg-emerald-500 px-3 py-2 text-xs font-semibold text-white shadow-[0_12px_30px_rgba(16,185,129,0.28)]">
+
+                {/* Donor marker — position updates reactively via markerPos */}
+                <div
+                  className="absolute flex -translate-x-1/2 -translate-y-1/2 items-center gap-2 rounded-full bg-emerald-500 px-3 py-2 text-xs font-semibold text-white shadow-[0_12px_30px_rgba(16,185,129,0.28)] transition-all duration-1000 ease-linear"
+                  style={{ left: markerPos.left, top: markerPos.top }}
+                >
                   <MapPin className="h-3.5 w-3.5" />
                   Donor
                 </div>
+
                 <div className="absolute inset-0">
                   <svg viewBox="0 0 100 100" className="h-full w-full">
                     <path d="M 21 66 C 42 63, 56 50, 81 31" fill="none" stroke="rgba(255,255,255,0.55)" strokeDasharray="5 5" strokeWidth="1.4" />
@@ -263,6 +358,7 @@ export default function HospitalDashboard() {
         </Card>
       )}
 
+      {/* ── Request controls ─────────────────────────────────────────────────── */}
       <div className="grid gap-6 lg:grid-cols-2">
         <Card>
           <CardHeader>
@@ -274,11 +370,23 @@ export default function HospitalDashboard() {
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="grid gap-4 md:grid-cols-2">
-              <select value={requestDraft.bloodGroup} onChange={(e) => setRequestDraft((prev) => ({ ...prev, bloodGroup: e.target.value }))} className="rounded-[1rem] border border-white/10 bg-white/6 px-4 py-3 text-white outline-none">
-                {['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-'].map((group) => <option key={group} value={group} className="bg-slate-950">{group}</option>)}
+              <select
+                value={requestDraft.bloodGroup}
+                onChange={(e) => setRequestDraft((prev) => ({ ...prev, bloodGroup: e.target.value }))}
+                className="rounded-[1rem] border border-white/10 bg-white/6 px-4 py-3 text-white outline-none"
+              >
+                {['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-'].map((group) => (
+                  <option key={group} value={group} className="bg-slate-950">{group}</option>
+                ))}
               </select>
-              <select value={requestDraft.urgency} onChange={(e) => setRequestDraft((prev) => ({ ...prev, urgency: e.target.value }))} className="rounded-[1rem] border border-white/10 bg-white/6 px-4 py-3 text-white outline-none">
-                {['Critical', 'High', 'Medium', 'Low'].map((urgency) => <option key={urgency} value={urgency} className="bg-slate-950">{urgency}</option>)}
+              <select
+                value={requestDraft.urgency}
+                onChange={(e) => setRequestDraft((prev) => ({ ...prev, urgency: e.target.value }))}
+                className="rounded-[1rem] border border-white/10 bg-white/6 px-4 py-3 text-white outline-none"
+              >
+                {['Critical', 'High', 'Medium', 'Low'].map((urgency) => (
+                  <option key={urgency} value={urgency} className="bg-slate-950">{urgency}</option>
+                ))}
               </select>
             </div>
             <Button onClick={handleCreateRequest} size="lg" disabled={requesting}>
@@ -286,10 +394,14 @@ export default function HospitalDashboard() {
             </Button>
             {requestResult?.meta && (
               <div className="rounded-[1rem] border border-white/10 bg-white/5 p-4 text-sm text-slate-200">
-                Radius: {requestResult.meta.radiusKm} km. Notified donors: {requestResult.meta.notifiedDonorCount}.
+                Radius: {requestResult.meta.radiusKm} km · Notified donors: {requestResult.meta.notifiedDonorCount}
               </div>
             )}
-            {statusMessage && <div className="rounded-[1rem] border border-white/10 bg-white/5 p-4 text-sm text-slate-200">{statusMessage}</div>}
+            {statusMessage && !acceptedEmergency && (
+              <div className="rounded-[1rem] border border-white/10 bg-white/5 p-4 text-sm text-slate-200">
+                {statusMessage}
+              </div>
+            )}
           </CardContent>
         </Card>
 
@@ -303,7 +415,12 @@ export default function HospitalDashboard() {
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="flex gap-3">
-              <input value={lookupValue} onChange={(e) => setLookupValue(e.target.value)} placeholder="ABHA number or address" className="flex-1 rounded-[1rem] border border-white/10 bg-white/6 px-4 py-3 text-white placeholder:text-slate-400 outline-none" />
+              <input
+                value={lookupValue}
+                onChange={(e) => setLookupValue(e.target.value)}
+                placeholder="ABHA number or address"
+                className="flex-1 rounded-[1rem] border border-white/10 bg-white/6 px-4 py-3 text-white placeholder:text-slate-400 outline-none"
+              />
               <Button variant="secondary" onClick={handleLookup}><Search className="h-4 w-4" /> Lookup</Button>
             </div>
             {lookupProfile && (

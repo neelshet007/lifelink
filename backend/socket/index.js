@@ -111,6 +111,8 @@ module.exports = function setupSocket(server) {
 
     io.to(request.requester._id.toString()).emit('DONOR_ACCEPTED', eventPayload);
     io.to(request.requester._id.toString()).emit('EMERGENCY_ACCEPTED', eventPayload);
+    // Combined closed-loop event: hospital listens to one event for both outcomes
+    io.to(request.requester._id.toString()).emit('DONOR_RESPONSE_RECEIVED', { ...eventPayload, status: 'accepted' });
   }
 
   async function emitDonorDeclined(socket, payload = {}) {
@@ -126,6 +128,8 @@ module.exports = function setupSocket(server) {
 
     io.to(request.requester.toString()).emit('DONOR_DECLINED', eventPayload);
     io.to(request.requester.toString()).emit('EMERGENCY_DECLINED', eventPayload);
+    // Combined closed-loop event
+    io.to(request.requester.toString()).emit('DONOR_RESPONSE_RECEIVED', { ...eventPayload, status: 'declined' });
   }
 
   async function emitLocationUpdate(socket, payload = {}) {

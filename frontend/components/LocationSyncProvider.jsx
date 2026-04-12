@@ -1,16 +1,17 @@
 'use client';
 
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import { getRealtimeSocket } from '../lib/realtime';
 import { getStoredUser } from '../lib/session';
 import {
   clearEmergency,
   getSocketStoreState,
-  hydrateSocketStore,
   setActiveEmergency,
   setConnectionStatus,
   setRealtimeSession,
 } from '../lib/socketStore';
+
+const LOCATION_EMIT_INTERVAL_MS = 5000; // emit donor position every 5 s during nav mode
 
 function getSavedCoordinates(user) {
   const latitude = Number(user?.location?.coordinates?.[1]);
@@ -89,8 +90,13 @@ function normalizeIncomingEmergency(payload) {
 }
 
 export default function LocationSyncProvider() {
+  // Track last time we emitted a navigation location update
+  const lastNavEmitRef = useRef(0);
+
   useEffect(() => {
-    hydrateSocketStore();
+    // NOTE: hydrateSocketStore() is now called synchronously at module load in
+    // socketStore.js — no need to call it here. Removing it prevents a redundant
+    // emit that was causing an unnecessary extra render on mount.
 
     const user = getStoredUser();
     const userId = user?._id || user?.id;
@@ -145,6 +151,8 @@ export default function LocationSyncProvider() {
     };
 
     setConnectionStatus(socket.connected ? 'online' : 'connecting');
+
+    // Register listeners with explicit named handlers for clean socket.off() cleanup
     socket.on('connect', onConnect);
     socket.on('disconnect', onDisconnect);
     socket.on('session_ready', onSessionReady);
@@ -176,15 +184,24 @@ export default function LocationSyncProvider() {
           longitude: position.coords.longitude,
         };
 
+        // Always sync session coordinates (lightweight)
         socket.emit('update_location', latestCoords);
 
+        // ── Navigation mode: throttled live donor location broadcast ────────────
+        // Only emit LOCATION_UPDATE during active navigation, and at most once
+        // every LOCATION_EMIT_INTERVAL_MS (5 seconds) to avoid flooding the server.
+        // ──────────────────────────────────────────────────────────────────────────
         const { activeEmergency, navigationMode } = getSocketStoreState();
         if (user.role === 'User' && navigationMode && activeEmergency?.requestId) {
-          socket.emit('LOCATION_UPDATE', {
-            requestId: activeEmergency.requestId,
-            donorId: userId,
-            coordinates: latestCoords,
-          });
+          const now = Date.now();
+          if (now - lastNavEmitRef.current >= LOCATION_EMIT_INTERVAL_MS) {
+            lastNavEmitRef.current = now;
+            socket.emit('LOCATION_UPDATE', {
+              requestId: activeEmergency.requestId,
+              donorId: userId,
+              coordinates: latestCoords,
+            });
+          }
         }
       },
       () => {},

@@ -3,6 +3,7 @@
 const STORAGE_KEY = 'lifelink-socket-store';
 const listeners = new Set();
 
+// Mutable backing state
 const state = {
   connectionStatus: 'offline',
   session: null,
@@ -13,7 +14,17 @@ const state = {
   dashboardPulseToken: 0,
 };
 
+// ─── CRITICAL FIX ────────────────────────────────────────────────────────────
+// useSyncExternalStore compares snapshots by reference equality.
+// Returning the same mutable `state` object every call means React can never
+// detect a change and will skip re-renders (ghost notification bug).
+// We maintain a separate `snapshot` that is replaced with a shallow-copy on
+// every emit() call, giving React a new reference to compare against.
+// ─────────────────────────────────────────────────────────────────────────────
+let snapshot = { ...state };
+
 function emit() {
+  snapshot = { ...state }; // new reference on every state change
   listeners.forEach((listener) => listener());
 }
 
@@ -28,16 +39,12 @@ function persist() {
   }));
 }
 
-export function socketStoreSubscribe(listener) {
-  listeners.add(listener);
-  return () => listeners.delete(listener);
-}
-
-export function getSocketStoreState() {
-  return state;
-}
-
-export function hydrateSocketStore() {
+// ─── HYDRATION AT MODULE LOAD ─────────────────────────────────────────────────
+// Hydrate from localStorage synchronously when this module is first imported.
+// This ensures emergency state is ready on the very first render — calling
+// hydrateSocketStore() inside a useEffect is too late (runs after first paint).
+// ─────────────────────────────────────────────────────────────────────────────
+function hydrateNow() {
   if (typeof window === 'undefined') return;
   const stored = localStorage.getItem(STORAGE_KEY);
   if (!stored) return;
@@ -49,10 +56,28 @@ export function hydrateSocketStore() {
     state.activeAlerts = Array.isArray(parsed.activeAlerts) ? parsed.activeAlerts : [];
     state.emergencyDrawerOpen = parsed.emergencyDrawerOpen !== false && Boolean(parsed.activeEmergency);
     state.navigationMode = parsed.navigationMode === true && Boolean(parsed.activeEmergency);
-    emit();
+    snapshot = { ...state }; // sync snapshot immediately — no emit needed
   } catch {
     localStorage.removeItem(STORAGE_KEY);
   }
+}
+
+// Run once synchronously on module import
+hydrateNow();
+
+export function socketStoreSubscribe(listener) {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
+
+export function getSocketStoreState() {
+  return snapshot;
+}
+
+// ── Kept for backward compatibility (LocationSyncProvider calls this) ──────────
+export function hydrateSocketStore() {
+  hydrateNow();
+  emit(); // notify already-mounted subscribers
 }
 
 export function setConnectionStatus(connectionStatus) {
