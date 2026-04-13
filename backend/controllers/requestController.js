@@ -4,19 +4,14 @@ const User = require('../models/User');
 const MockSandboxRegistry = require('../models/MockSandboxRegistry');
 const { getDistance, calculateScore, isBloodGroupCompatible } = require('../utils/matchingAlgorithm');
 
-const EMERGENCY_EXPIRY_MS = 15 * 60 * 1000;
-
+// ── Prototype mode: all eligibility/cooldown checks are bypassed ─────────────
 const getCompatibility = (donorBloodGroup, requestedBloodGroup) => {
   if (!donorBloodGroup) return 'Not compatible';
   if (donorBloodGroup === requestedBloodGroup) return 'Exact';
   return isBloodGroupCompatible(donorBloodGroup, requestedBloodGroup) ? 'Compatible' : 'Not compatible';
 };
 
-const checkEligibility = (lastDonationDate) => {
-  if (!lastDonationDate) return true;
-  const days = Math.floor((Date.now() - new Date(lastDonationDate).getTime()) / (1000 * 60 * 60 * 24));
-  return days >= 90;
-};
+const checkEligibility = () => true; // bypassed for prototype
 
 const resolveUserBloodGroup = async (user) => {
   if (user?.abhaAddress) {
@@ -29,121 +24,111 @@ const resolveUserBloodGroup = async (user) => {
 
 const createRequest = async (req, res) => {
   try {
-    const { bloodGroup, urgency } = req.body;
-    const requester = await User.findById(req.user._id);
-    const io = req.app.get('io');
-    const activeSession = io?.getSessionByUserId?.(req.user._id);
-    const latitude = Number(activeSession?.latitude ?? requester?.location?.coordinates?.[1]);
-    const longitude = Number(activeSession?.longitude ?? requester?.location?.coordinates?.[0]);
+    const { bloodGroup, urgency, requestType, bloodUnits } = req.body;
 
-    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
-      return res.status(400).json({ message: 'Live hospital coordinates are required before creating an emergency request.' });
+    // ── Step 1: Resolve the sender from the database (source of truth) ──────────
+    // We read the name directly from the DB document, NOT from the JWT or socket
+    // session, to prevent the identity-swap bug.
+    const requesterDoc = await User.findById(req.user._id).select('name role location hfrFacilityId dcgiLicenseNumber abhaAddress');
+    if (!requesterDoc) {
+      return res.status(404).json({ message: 'Requesting user not found.' });
     }
 
+    const io = req.app.get('io');
+    const activeSession = io?.getSessionByUserId?.(req.user._id);
+
+    const latitude  = Number(activeSession?.latitude  ?? requesterDoc.location?.coordinates?.[1]);
+    const longitude = Number(activeSession?.longitude ?? requesterDoc.location?.coordinates?.[0]);
+
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+      return res.status(400).json({ message: 'Live coordinates are required before creating a request.' });
+    }
+
+    const senderId =
+      requesterDoc.role === 'Hospital'   ? requesterDoc.hfrFacilityId    :
+      requesterDoc.role === 'Blood Bank' ? requesterDoc.dcgiLicenseNumber :
+                                           requesterDoc.abhaAddress;
+
+    // ── Step 2: Save to MongoDB with senderName locked as a static String ────────
+    // senderName is NEVER populated from a socket session or JWT claim —
+    // only from the DB document loaded above. It will not change for the
+    // lifetime of this request document.
     const request = await Request.create({
-      requester: req.user._id,
+      requester:  requesterDoc._id,
+      senderName: requesterDoc.name,          // static — frozen at creation
+      senderType: requesterDoc.role,
+      senderId:   senderId || 'SYSTEM',
       bloodGroup,
-      urgency: urgency || 'Medium',
+      bloodUnits: bloodUnits || 1,
+      urgency:    urgency || 'Standard',
+      requestType: requestType || 'Blood Request',
       location: {
         type: 'Point',
         coordinates: [longitude, latitude],
       },
+      status: 'Pending',
     });
 
-    const expiresAt = new Date(request.createdAt.getTime() + EMERGENCY_EXPIRY_MS).toISOString();
-    const notifiedSocketIds = [];
-    const scoredMatches = [];
+    // ── Step 3: Signal the mesh via socket (DB save already complete) ─────────────
+    // Only send the minimal safe payload. We do NOT include the requester's full
+    // user object — only identifiers and the frozen senderName from the DB record.
+    if (io) {
+      const activeSessions = io.getActiveSessions?.();
+      if (activeSessions) {
+        const { getDistance: gd } = require('../utils/matchingAlgorithm');
+        const USER_RADIUS     = 5;
+        const FACILITY_RADIUS = 10;
+        let notified = 0;
 
-    if (io && typeof io.getNearbyEligibleRecipients === 'function' &&
-      (req.user.role === 'Hospital' || req.user.role === 'Blood Bank')) {
-      const recipients = io.getNearbyEligibleRecipients({
-        latitude,
-        longitude,
-        bloodGroup,
-        radiusKm: 5,
-        excludeUserId: req.user._id,
-      });
+        for (const [, session] of activeSessions.entries()) {
+          if (String(session.userId) === String(requesterDoc._id)) continue;
+          if (!Number.isFinite(session.latitude) || !Number.isFinite(session.longitude)) continue;
 
-      const recipientUsers = await User.find({
-        _id: { $in: recipients.map((recipient) => recipient.userId) },
-      }).select('name email isAvailable is_eligible lastDonationDate abhaAddress bloodGroup');
+          const dist  = gd(latitude, longitude, session.latitude, session.longitude);
+          const limit = session.role === 'User' ? USER_RADIUS : FACILITY_RADIUS;
+          if (dist > limit) continue;
 
-      const userMap = new Map(recipientUsers.map((user) => [String(user._id), user]));
+          // Minimal mesh payload — only what the recipient needs to render the alert.
+          // senderName comes from the DB record, not from the session or JWT.
+          const meshPayload = {
+            requestId:   request._id,
+            senderName:  request.senderName,   // ← DB-frozen value
+            senderType:  request.senderType,
+            bloodGroup:  request.bloodGroup,
+            bloodUnits:  request.bloodUnits,
+            urgency:     request.urgency,
+            requestType: request.requestType,
+            distanceKm:  Number(dist.toFixed(2)),
+            distance:    dist.toFixed(1),
+            senderCoords: { latitude, longitude },
+          };
 
-      for (const recipient of recipients) {
-        const donor = userMap.get(String(recipient.userId));
-        if (!donor) continue;
+          io.to(session.socketId).emit('GLOBAL_EMERGENCY_DATA', meshPayload);
 
-        const donorBloodGroup = await resolveUserBloodGroup(donor);
-        const compatibility = getCompatibility(donorBloodGroup, bloodGroup);
-        const available = donor.isAvailable !== false;
-        const eligible = donor.is_eligible !== false && checkEligibility(donor.lastDonationDate);
+          // Legacy event for the User EmergencyActionDock
+          if (session.role === 'User') {
+            io.to(session.socketId).emit('INCOMING_EMERGENCY', {
+              ...meshPayload,
+              hospital:      request.senderName,
+              hospitalType:  request.senderType,
+              hospitalCoords: { latitude, longitude },
+              message: `${request.senderType} (${request.senderName}) needs ${bloodGroup} — ${dist.toFixed(1)} km away`,
+            });
+          }
 
-        if (compatibility === 'Not compatible' || !available || !eligible) {
-          continue;
+          notified++;
         }
 
-        const lastDonationDaysAgo = donor.lastDonationDate
-          ? Math.floor((Date.now() - new Date(donor.lastDonationDate).getTime()) / (1000 * 60 * 60 * 24))
-          : null;
-
-        scoredMatches.push({
-          user: {
-            _id: donor._id,
-            name: donor.name,
-            role: 'User',
-            distance: recipient.distanceKm.toFixed(2),
-            email: donor.email,
-          },
-          score: calculateScore(recipient.distanceKm, compatibility, available, lastDonationDaysAgo),
-          distance: recipient.distanceKm,
-        });
-
-        io.to(recipient.socketId).emit('INCOMING_EMERGENCY', {
-          requestId: request._id,
-          bloodGroup,
-          urgency: urgency || 'Medium',
-          hospital: requester?.name || req.user.name,
-          hospitalId: requester?._id || req.user._id,
-          requesterRole: req.user.role,
-          message: `Emergency: ${bloodGroup} needed ${recipient.distanceKm.toFixed(1)} km away`,
-          distance: recipient.distanceKm.toFixed(1),
-          distanceKm: Number(recipient.distanceKm.toFixed(2)),
-          hospitalCoords: { latitude, longitude },
-          createdAt: request.createdAt,
-          expiresAt,
-        });
-
-        notifiedSocketIds.push(recipient.socketId);
+        request.notifiedDonorCount = notified;
+        await request.save();
       }
-
-      scoredMatches.sort((a, b) => b.score - a.score);
-      request.notifiedDonorCount = notifiedSocketIds.length;
-      await request.save();
-
-      if (typeof io.trackNotifiedSockets === 'function') {
-        io.trackNotifiedSockets(request._id, notifiedSocketIds);
-      }
-
-      setTimeout(() => {
-        if (typeof io.emitRequestExpired === 'function') {
-          io.emitRequestExpired(request._id, expiresAt);
-        }
-
-        Request.findOneAndUpdate(
-          { _id: request._id, status: 'Pending' },
-          { $set: { status: 'Expired' } }
-        ).catch((err) => console.error('[Request] Failed to mark request as expired:', err));
-      }, EMERGENCY_EXPIRY_MS);
     }
 
     return res.status(201).json({
       request,
-      matches: scoredMatches,
       meta: {
-        notifiedDonorCount: notifiedSocketIds.length,
-        radiusKm: 5,
-        hospitalCoords: { latitude, longitude },
+        notifiedCount: request.notifiedDonorCount,
+        coords: { latitude, longitude },
       },
     });
   } catch (error) {
@@ -151,6 +136,7 @@ const createRequest = async (req, res) => {
     return res.status(500).json({ message: 'Server error' });
   }
 };
+
 
 const getMyRequests = async (req, res) => {
   try {
@@ -184,6 +170,43 @@ const getIncomingRequests = async (req, res) => {
 
     return res.json(nearbyRequests);
   } catch (error) {
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+const getExternalRequirements = async (req, res) => {
+  try {
+    const user = await User.findById(req.user._id).select('location role');
+    if (user.role !== 'Blood Bank' && user.role !== 'Hospital') {
+      return res.status(403).json({ message: 'Forbidden' });
+    }
+
+    const latitude = user?.location?.coordinates?.[1];
+    const longitude = user?.location?.coordinates?.[0];
+
+    // Find all pending requests (not created by self)
+    const requests = await Request
+      .find({ 
+        status: { $in: ['Pending', 'Stock Confirmed'] },
+        requester: { $ne: req.user._id }
+      })
+      .populate('requester', 'name role')
+      .sort({ createdAt: -1 });
+
+    const filtered = requests.filter((request) => {
+      const requestLatitude = request.location?.coordinates?.[1];
+      const requestLongitude = request.location?.coordinates?.[0];
+      if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return false;
+      if (!Number.isFinite(requestLatitude) || !Number.isFinite(requestLongitude)) return false;
+      
+      const distance = getDistance(latitude, longitude, requestLatitude, requestLongitude);
+      // Facilities see requests within 10km
+      return distance <= 10;
+    });
+
+    return res.json(filtered);
+  } catch (error) {
+    console.error('getExternalRequirements error:', error);
     return res.status(500).json({ message: 'Server error' });
   }
 };
@@ -383,6 +406,7 @@ module.exports = {
   createRequest,
   getMyRequests,
   getIncomingRequests,
+  getExternalRequirements,
   updateRequestStatus,
   getRequestMatches,
   assignDonor,

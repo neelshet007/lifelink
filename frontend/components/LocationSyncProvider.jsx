@@ -4,100 +4,67 @@ import { useEffect, useRef } from 'react';
 import { getRealtimeSocket } from '../lib/realtime';
 import { getStoredUser } from '../lib/session';
 import {
+  addMeshAlert,
   clearEmergency,
   getSocketStoreState,
+  removeMeshAlert,
   setActiveEmergency,
   setConnectionStatus,
   setRealtimeSession,
+  setRequestConfirmed,
 } from '../lib/socketStore';
 
-const LOCATION_EMIT_INTERVAL_MS = 5000; // emit donor position every 5 s during nav mode
+const LOCATION_EMIT_INTERVAL_MS = 5000;
 
 function getSavedCoordinates(user) {
   const latitude = Number(user?.location?.coordinates?.[1]);
   const longitude = Number(user?.location?.coordinates?.[0]);
-
-  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
-    return null;
-  }
-
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return null;
   return { latitude, longitude };
 }
 
-function createMapLink(hospitalCoords) {
-  const latitude = Number(hospitalCoords?.latitude);
-  const longitude = Number(hospitalCoords?.longitude);
-  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return '';
-  return `https://www.google.com/maps?q=${latitude},${longitude}`;
+function createMapLink(coords) {
+  const lat = Number(coords?.latitude);
+  const lng = Number(coords?.longitude);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return '';
+  return `https://www.google.com/maps?q=${lat},${lng}`;
 }
 
 function playEmergencySound() {
   if (typeof window === 'undefined') return;
-
   const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
   if (!AudioContextCtor) return;
-
   try {
     const context = new AudioContextCtor();
-    const sequence = [0, 0.18, 0.36];
-
-    sequence.forEach((offset, index) => {
+    [0, 0.18, 0.36].forEach((offset, index) => {
       const oscillator = context.createOscillator();
       const gain = context.createGain();
-
       oscillator.type = 'sine';
       oscillator.frequency.value = index % 2 === 0 ? 880 : 660;
       gain.gain.setValueAtTime(0.0001, context.currentTime + offset);
       gain.gain.exponentialRampToValueAtTime(0.12, context.currentTime + offset + 0.02);
       gain.gain.exponentialRampToValueAtTime(0.0001, context.currentTime + offset + 0.14);
-
       oscillator.connect(gain);
       gain.connect(context.destination);
       oscillator.start(context.currentTime + offset);
       oscillator.stop(context.currentTime + offset + 0.16);
     });
-
-    setTimeout(() => {
-      context.close().catch(() => {});
-    }, 900);
+    setTimeout(() => context.close().catch(() => {}), 900);
   } catch {}
 }
 
-function notifyEmergency(payload) {
+function notifyBrowser(title, body, tag) {
   if (typeof window === 'undefined' || !('Notification' in window)) return;
   if (Notification.permission !== 'granted') return;
-
-  const distanceLabel = Number.isFinite(Number(payload.distanceKm))
-    ? `${Number(payload.distanceKm).toFixed(1)} km away`
-    : 'nearby now';
-
   try {
-    new Notification('LifeLink Emergency Alert', {
-      body: `${payload.hospital} needs ${payload.bloodGroup}. ${distanceLabel}.`,
-      tag: `emergency-${payload.requestId}`,
-      requireInteraction: true,
-    });
+    new Notification(title, { body, tag, requireInteraction: true });
   } catch {}
-}
-
-function normalizeIncomingEmergency(payload) {
-  return {
-    ...payload,
-    hospitalType: payload.hospitalType || payload.requesterRole || 'Hospital',
-    mapLink: payload.mapLink || createMapLink(payload.hospitalCoords),
-    responseStatus: 'pending',
-  };
 }
 
 export default function LocationSyncProvider() {
-  // Track last time we emitted a navigation location update
   const lastNavEmitRef = useRef(0);
 
   useEffect(() => {
-    // NOTE: hydrateSocketStore() is now called synchronously at module load in
-    // socketStore.js — no need to call it here. Removing it prevents a redundant
-    // emit that was causing an unnecessary extra render on mount.
-
     const user = getStoredUser();
     const userId = user?._id || user?.id;
     if (!userId) return undefined;
@@ -122,48 +89,95 @@ export default function LocationSyncProvider() {
       initSession();
     };
 
-    const onDisconnect = () => {
-      setConnectionStatus('offline');
-    };
+    const onDisconnect = () => setConnectionStatus('offline');
+    const onSessionReady = (session) => { setRealtimeSession(session); setConnectionStatus('online'); };
+    const onSessionError = () => setConnectionStatus('offline');
 
-    const onSessionReady = (session) => {
-      setRealtimeSession(session);
-      setConnectionStatus('online');
-    };
+    // ── GLOBAL EMERGENCY DATA — fires for ALL roles ───────────────────────────
+    // Incoming alert from another entity. Stored in meshAlerts[] only.
+    // NEVER written to activeEmergency — that field is exclusively for the
+    // logged-in user's own outbound request so the header name never changes.
+    const onGlobalEmergency = (payload) => {
+      const normalised = {
+        ...payload,
+        requestId: payload.requestId,
+        senderName: payload.senderName,        // the SENDER's name (not ours)
+        senderType: payload.senderType,
+        hospital: payload.senderName,           // alias for legacy UI parts
+        hospitalType: payload.senderType,
+        hospitalCoords: payload.senderCoords,
+        mapLink: createMapLink(payload.senderCoords),
+        responseStatus: 'pending',
+        message:
+          payload.message ||
+          `${payload.senderType} (${payload.senderName}) needs ${payload.bloodGroup} — ${payload.distance ?? payload.distanceKm} km away`,
+      };
 
-    const onSessionError = () => {
-      setConnectionStatus('offline');
-    };
-
-    const onIncomingEmergency = (payload) => {
-      const emergency = normalizeIncomingEmergency(payload);
-      setActiveEmergency(emergency, { navigationMode: false });
-      notifyEmergency(emergency);
+      // Only add to mesh feed — do NOT call setActiveEmergency here.
+      addMeshAlert(normalised);
       playEmergencySound();
+      notifyBrowser(
+        'LifeLink Mesh Alert',
+        `${payload.senderName} (${payload.senderType}) needs ${payload.bloodGroup} — ${payload.distance ?? payload.distanceKm} km away`,
+        `mesh-${payload.requestId}`
+      );
+    };
+
+    // ── INCOMING_EMERGENCY — legacy alias for User EmergencyActionDock ────────
+    const onIncomingEmergency = (payload) => {
+      const emergency = {
+        ...payload,
+        hospitalType: payload.hospitalType || payload.requesterRole || payload.senderType || 'Hospital',
+        mapLink: payload.mapLink || createMapLink(payload.hospitalCoords || payload.senderCoords),
+        responseStatus: 'pending',
+      };
+      if (user.role === 'User') {
+        setActiveEmergency(emergency, { navigationMode: false });
+        playEmergencySound();
+        notifyBrowser(
+          'LifeLink Emergency Alert',
+          `${emergency.hospital} needs ${emergency.bloodGroup}. ${Number.isFinite(Number(emergency.distanceKm)) ? `${Number(emergency.distanceKm).toFixed(1)} km away` : 'nearby now'}.`,
+          `emergency-${emergency.requestId}`
+        );
+      }
+    };
+
+    // ── REQUEST_CONFIRMED — original requester gets this when someone responds ──
+    const onRequestConfirmed = (payload) => {
+      setRequestConfirmed(payload);
+    };
+
+    // ── INCOMING_REQUEST — from REST-triggered broadcasts (facility dashboards) ─
+    const onIncomingRequest = (payload) => {
+      // Treat exactly like GLOBAL_EMERGENCY_DATA
+      onGlobalEmergency({ ...payload, senderName: payload.senderName, senderType: payload.senderType });
     };
 
     const onRequestExpired = (payload) => {
       clearEmergency(payload?.requestId);
+      removeMeshAlert(payload?.requestId);
     };
 
     const onRequestFulfilled = (payload) => {
       clearEmergency(payload?.requestId);
+      removeMeshAlert(payload?.requestId);
     };
 
     setConnectionStatus(socket.connected ? 'online' : 'connecting');
 
-    // Register listeners with explicit named handlers for clean socket.off() cleanup
     socket.on('connect', onConnect);
     socket.on('disconnect', onDisconnect);
     socket.on('session_ready', onSessionReady);
     socket.on('session_error', onSessionError);
+    socket.on('GLOBAL_EMERGENCY_DATA', onGlobalEmergency);
     socket.on('INCOMING_EMERGENCY', onIncomingEmergency);
+    socket.on('INCOMING_REQUEST', onIncomingRequest);
+    socket.on('REQUEST_CONFIRMED', onRequestConfirmed);
+    socket.on('NOTIFY_REQUESTER', onRequestConfirmed);   // alias
     socket.on('REQUEST_EXPIRED', onRequestExpired);
     socket.on('REQUEST_FULFILLED', onRequestFulfilled);
 
-    if (socket.connected) {
-      onConnect();
-    }
+    if (socket.connected) onConnect();
 
     if (!navigator.geolocation) {
       return () => {
@@ -171,7 +185,11 @@ export default function LocationSyncProvider() {
         socket.off('disconnect', onDisconnect);
         socket.off('session_ready', onSessionReady);
         socket.off('session_error', onSessionError);
+        socket.off('GLOBAL_EMERGENCY_DATA', onGlobalEmergency);
         socket.off('INCOMING_EMERGENCY', onIncomingEmergency);
+        socket.off('INCOMING_REQUEST', onIncomingRequest);
+        socket.off('REQUEST_CONFIRMED', onRequestConfirmed);
+        socket.off('NOTIFY_REQUESTER', onRequestConfirmed);
         socket.off('REQUEST_EXPIRED', onRequestExpired);
         socket.off('REQUEST_FULFILLED', onRequestFulfilled);
       };
@@ -184,13 +202,8 @@ export default function LocationSyncProvider() {
           longitude: position.coords.longitude,
         };
 
-        // Always sync session coordinates (lightweight)
         socket.emit('update_location', latestCoords);
 
-        // ── Navigation mode: throttled live donor location broadcast ────────────
-        // Only emit LOCATION_UPDATE during active navigation, and at most once
-        // every LOCATION_EMIT_INTERVAL_MS (5 seconds) to avoid flooding the server.
-        // ──────────────────────────────────────────────────────────────────────────
         const { activeEmergency, navigationMode } = getSocketStoreState();
         if (user.role === 'User' && navigationMode && activeEmergency?.requestId) {
           const now = Date.now();
@@ -205,11 +218,7 @@ export default function LocationSyncProvider() {
         }
       },
       () => {},
-      {
-        enableHighAccuracy: true,
-        maximumAge: 30000,
-        timeout: 15000,
-      }
+      { enableHighAccuracy: true, maximumAge: 30000, timeout: 15000 }
     );
 
     return () => {
@@ -217,7 +226,11 @@ export default function LocationSyncProvider() {
       socket.off('disconnect', onDisconnect);
       socket.off('session_ready', onSessionReady);
       socket.off('session_error', onSessionError);
+      socket.off('GLOBAL_EMERGENCY_DATA', onGlobalEmergency);
       socket.off('INCOMING_EMERGENCY', onIncomingEmergency);
+      socket.off('INCOMING_REQUEST', onIncomingRequest);
+      socket.off('REQUEST_CONFIRMED', onRequestConfirmed);
+      socket.off('NOTIFY_REQUESTER', onRequestConfirmed);
       socket.off('REQUEST_EXPIRED', onRequestExpired);
       socket.off('REQUEST_FULFILLED', onRequestFulfilled);
       navigator.geolocation.clearWatch(watchId);

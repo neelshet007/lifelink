@@ -6,6 +6,7 @@ import { Activity, BadgeCheck, Building2, LogOut, ShieldCheck, User } from 'luci
 import Link from 'next/link';
 import EmergencyActionDock from '../../components/EmergencyActionDock';
 import LocationSyncProvider from '../../components/LocationSyncProvider';
+import MeshAlertModal from '../../components/MeshAlertModal';
 import { useDpi } from '../../components/providers/DpiProvider';
 import { Badge } from '../../components/ui/badge';
 import { disconnectRealtimeSocket } from '../../lib/realtime';
@@ -24,6 +25,8 @@ export default function DashboardLayout({ children }) {
   const { clearSession } = useDpi();
   const isClient = useSyncExternalStore(clientSubscribe, () => true, () => false);
   const { connectionStatus } = useSyncExternalStore(socketSubscribe, getSocketStoreState, getSocketStoreState);
+  // NOTE: user is read ONLY from localStorage here — it is the logged-in person.
+  // Incoming mesh alert senderNames are stored separately in socketStore.meshAlerts.
   const token = isClient ? localStorage.getItem('token') : null;
   const user = isClient ? JSON.parse(localStorage.getItem('user') || 'null') : null;
 
@@ -98,6 +101,10 @@ export default function DashboardLayout({ children }) {
           </div>
         </div>
       </nav>
+
+      {/* ── Persistent Mesh Alert Modal (all roles, all pages) ───────────────── */}
+      {/* Rendered after the nav so it sits on top of all page content */}
+      <MeshAlertModal />
 
       <main className="flex-1 w-full mx-auto relative relative pb-40">
         <div className="absolute top-0 left-1/2 -translate-x-1/2 w-full max-w-7xl h-full overflow-hidden z-0 pointer-events-none">

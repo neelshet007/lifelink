@@ -9,6 +9,8 @@ const state = {
   session: null,
   activeEmergency: null,
   activeAlerts: [],
+  meshAlerts: [],        // incoming GLOBAL_EMERGENCY_DATA for all roles
+  requestConfirmed: null, // REQUEST_CONFIRMED payload
   emergencyDrawerOpen: false,
   navigationMode: false,
   dashboardPulseToken: 0,
@@ -34,6 +36,7 @@ function persist() {
     session: state.session,
     activeEmergency: state.activeEmergency,
     activeAlerts: state.activeAlerts,
+    meshAlerts: state.meshAlerts.slice(0, 10),
     emergencyDrawerOpen: state.emergencyDrawerOpen,
     navigationMode: state.navigationMode,
   }));
@@ -54,6 +57,7 @@ function hydrateNow() {
     state.session = parsed.session || null;
     state.activeEmergency = parsed.activeEmergency || null;
     state.activeAlerts = Array.isArray(parsed.activeAlerts) ? parsed.activeAlerts : [];
+    state.meshAlerts = Array.isArray(parsed.meshAlerts) ? parsed.meshAlerts : [];
     state.emergencyDrawerOpen = parsed.emergencyDrawerOpen !== false && Boolean(parsed.activeEmergency);
     state.navigationMode = parsed.navigationMode === true && Boolean(parsed.activeEmergency);
     snapshot = { ...state }; // sync snapshot immediately — no emit needed
@@ -153,11 +157,44 @@ export function setNavigationMode(open) {
   emit();
 }
 
+// ── Mesh alert management ─────────────────────────────────────────────────────
+export function addMeshAlert(alert) {
+  const key = String(alert.requestId);
+  // Deduplicate by requestId
+  const existing = state.meshAlerts.findIndex(a => String(a.requestId) === key);
+  if (existing !== -1) {
+    state.meshAlerts[existing] = alert; // refresh
+  } else {
+    state.meshAlerts = [alert, ...state.meshAlerts].slice(0, 20);
+  }
+  state.dashboardPulseToken += 1;
+  persist();
+  emit();
+}
+
+export function removeMeshAlert(requestId) {
+  state.meshAlerts = state.meshAlerts.filter(a => String(a.requestId) !== String(requestId));
+  persist();
+  emit();
+}
+
+export function setRequestConfirmed(payload) {
+  state.requestConfirmed = payload;
+  emit();
+}
+
+export function clearRequestConfirmed() {
+  state.requestConfirmed = null;
+  emit();
+}
+
 export function resetSocketStore() {
   state.connectionStatus = 'offline';
   state.session = null;
   state.activeEmergency = null;
   state.activeAlerts = [];
+  state.meshAlerts = [];
+  state.requestConfirmed = null;
   state.emergencyDrawerOpen = false;
   state.navigationMode = false;
   state.dashboardPulseToken = 0;
