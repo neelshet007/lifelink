@@ -149,37 +149,40 @@ export default function HospitalDashboard() {
 
   // ── Actions ────────────────────────────────────────────────────────────────────
 
-  // REST-based: full database round-trip, returns notified count
-  const handleCreateRequest = async () => {
+  // Unified: speed (Socket) + persistence (DB)
+  const handleUnifiedBroadcast = async () => {
     if (!token) return;
+    
+    // Identical payload for both
+    const payload = {
+      ...requestDraft,
+      bloodUnits: requestDraft.bloodUnits || 1,
+      requestType: 'Blood Request',
+    };
+
+    // 1. Instant Socket Emit (Fire)
+    const socket = getRealtimeSocket();
+    setMeshBroadcasting(true);
+    socket.emit('REQUEST_BLOOD', payload);
+    
+    // 2. Background DB Save (Follow-up)
     setRequesting(true);
     setStatusMessage('');
     setAcceptedEmergency(null);
+    
     try {
-      const res = await axios.post(`${API_URL}/api/requests`, requestDraft, {
+      const res = await axios.post(`${API_URL}/api/requests`, payload, {
         headers: { Authorization: `Bearer ${token}` },
       });
       setRequestResult(res.data);
-      setStatusMessage(`⏳ Mesh broadcast sent. ${res.data.meta?.notifiedCount || 0} nodes notified within radius.`);
+      setStatusMessage('🚀 Broadcast Live & Recorded');
     } catch (error) {
-      setStatusMessage(error.response?.data?.message || 'Unable to create realtime emergency.');
+      // If DB fails but Socket succeeded
+      setStatusMessage('⚠️ The broadcast is live, but was not saved to history. Please try re-sending for a permanent record.');
     } finally {
       setRequesting(false);
+      setMeshBroadcasting(false);
     }
-  };
-
-  // Socket-direct: fastest path, emits REQUEST_BLOOD directly
-  const handleSocketBroadcast = () => {
-    const socket = getRealtimeSocket();
-    setMeshBroadcasting(true);
-    socket.emit('REQUEST_BLOOD', {
-      bloodGroup: requestDraft.bloodGroup,
-      bloodUnits: requestDraft.bloodUnits || 1,
-      urgency: requestDraft.urgency,
-      requestType: 'Blood Request',
-    });
-    setStatusMessage('⚡ Instant mesh broadcast sent. Awaiting responses...');
-    setTimeout(() => setMeshBroadcasting(false), 3000); // fallback timeout
   };
 
   const handleLookup = async () => {
@@ -382,22 +385,18 @@ export default function HospitalDashboard() {
                     className="rounded-[1rem] border border-white/10 bg-white/6 px-4 py-3 text-white outline-none"
                   />
                 </div>
-                <div className="grid gap-3 sm:grid-cols-2">
+                <div className="flex flex-col gap-3">
                   <Button
-                    onClick={handleSocketBroadcast}
+                    onClick={handleUnifiedBroadcast}
                     size="lg"
-                    disabled={meshBroadcasting}
-                    className="bg-red-600 hover:bg-red-700 text-white"
-                  >
-                    {meshBroadcasting ? <><Activity className="h-4 w-4 animate-spin" /> Sending...</> : <><Radio className="h-4 w-4" /> ⚡ Instant Mesh Broadcast</>}
-                  </Button>
-                  <Button
-                    onClick={handleCreateRequest}
-                    size="lg"
-                    variant="secondary"
                     disabled={requesting}
+                    className="w-full bg-red-600 hover:bg-red-700 text-white h-16 text-lg font-bold rounded-[1.2rem] shadow-[0_10px_40px_rgba(220,38,38,0.25)] gap-3 border-b-4 border-red-800 active:border-b-0 active:translate-y-1 transition-all"
                   >
-                    {requesting ? <><Activity className="h-4 w-4 animate-spin" /> Broadcasting...</> : 'REST Broadcast + DB'}
+                    {requesting ? (
+                      <><Activity className="h-6 w-6 animate-spin" /> Recording Broadcast...</>
+                    ) : (
+                      <><Radio className="h-6 w-6 animate-pulse" /> 🚀 Initiate Emergency Broadcast</>
+                    )}
                   </Button>
                 </div>
                 {statusMessage && !acceptedEmergency && (

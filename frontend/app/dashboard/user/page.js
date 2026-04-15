@@ -31,33 +31,34 @@ export default function UserDashboard() {
   const [meshBroadcasting, setMeshBroadcasting] = useState(false);
   const [activeTab, setActiveTab] = useState('status');
 
-  const handleCreateRequest = async () => {
+  const handleUnifiedBroadcast = async () => {
     if (!token) return;
+
+    const payload = {
+      ...requestDraft,
+      bloodUnits: requestDraft.bloodUnits || 1,
+      requestType: 'Blood Request',
+    };
+
+    // 1. Instant Socket Emit (Fire)
+    const socket = getRealtimeSocket();
+    setMeshBroadcasting(true);
+    socket.emit('REQUEST_BLOOD', payload);
+
+    // 2. Background DB Save (Follow-up)
     setSubmitting(true);
     setRequestStatus('');
     try {
-      const res = await axios.post(`${API_URL}/api/requests`, requestDraft, {
+      const res = await axios.post(`${API_URL}/api/requests`, payload, {
         headers: { Authorization: `Bearer ${token}` },
       });
-      setRequestStatus(`Emergency created. ${res.data.meta?.notifiedCount || 0} mesh nodes reached in your radius.`);
+      setRequestStatus('🚀 Broadcast Live & Recorded');
     } catch (error) {
-      setRequestStatus(error.response?.data?.message || 'Unable to create emergency request.');
+      setRequestStatus('⚠️ The broadcast is live, but was not saved to history. Please try re-sending for a permanent record.');
     } finally {
       setSubmitting(false);
+      setMeshBroadcasting(false);
     }
-  };
-
-  const handleSocketBroadcast = () => {
-    const socket = getRealtimeSocket();
-    setMeshBroadcasting(true);
-    socket.emit('REQUEST_BLOOD', {
-      bloodGroup: requestDraft.bloodGroup,
-      bloodUnits: requestDraft.bloodUnits || 1,
-      urgency: requestDraft.urgency,
-      requestType: 'Blood Request',
-    });
-    setRequestStatus('⚡ Instant mesh broadcast sent — hospitals and blood banks will see your request immediately.');
-    setTimeout(() => setMeshBroadcasting(false), 3000);
   };
 
   return (
@@ -188,20 +189,18 @@ export default function UserDashboard() {
                   className="rounded-[1rem] border border-white/10 bg-white/6 px-4 py-3 text-white outline-none"
                 />
               </div>
-              <div className="grid gap-3 sm:grid-cols-2">
+              <div className="flex flex-col gap-3">
                 <Button
-                  onClick={handleSocketBroadcast}
+                  onClick={handleUnifiedBroadcast}
                   size="lg"
-                  disabled={meshBroadcasting}
-                  className="bg-red-600 hover:bg-red-700 text-white"
+                  disabled={submitting}
+                  className="w-full bg-red-600 hover:bg-red-700 text-white h-16 text-lg font-bold rounded-[1.2rem] shadow-[0_10px_40px_rgba(220,38,38,0.25)] gap-3 border-b-4 border-red-800 active:border-b-0 active:translate-y-1 transition-all"
                 >
-                  {meshBroadcasting
-                    ? <><Activity className="h-4 w-4 animate-spin" /> Sending...</>
-                    : <><Radio className="h-4 w-4" /> ⚡ Instant Mesh Broadcast</>
-                  }
-                </Button>
-                <Button onClick={handleCreateRequest} size="lg" variant="secondary" disabled={submitting}>
-                  {submitting ? <><Activity className="h-4 w-4 animate-spin" /> Dispatching...</> : 'REST Request + DB'}
+                  {submitting ? (
+                    <><Activity className="h-6 w-6 animate-spin" /> Recording Broadcast...</>
+                  ) : (
+                    <><Radio className="h-6 w-6 animate-pulse" /> 🚀 Initiate Emergency Broadcast</>
+                  )}
                 </Button>
               </div>
               {requestStatus && (
